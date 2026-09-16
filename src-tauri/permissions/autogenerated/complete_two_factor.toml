@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-complete-two-factor"
+description = "Enables the complete_two_factor command without any pre-configured scope."
+commands.allow = ["complete_two_factor"]
+
+[[permission]]
+identifier = "deny-complete-two-factor"
+description = "Denies the complete_two_factor command without any pre-configured scope."
+commands.deny = ["complete_two_factor"]

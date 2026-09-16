@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Moyu Agent",
+  "version": "0.1.0",
+  "identifier": "top.inktandwkx.moyu-agent",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{"label": "main", "title": "Moyu Agent", "width": 1200, "height": 820, "minWidth": 360, "minHeight": 540}],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {"active": true, "targets": "all", "externalBin": ["binaries/opencode"], "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]}
+}

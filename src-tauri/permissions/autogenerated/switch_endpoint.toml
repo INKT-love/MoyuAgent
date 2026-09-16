@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-switch-endpoint"
+description = "Enables the switch_endpoint command without any pre-configured scope."
+commands.allow = ["switch_endpoint"]
+
+[[permission]]
+identifier = "deny-switch-endpoint"
+description = "Denies the switch_endpoint command without any pre-configured scope."
+commands.deny = ["switch_endpoint"]

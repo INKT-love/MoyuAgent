@@ -1,0 +1,19 @@
+[package]
+name = "tauri-plugin-secure-store"
+version = "0.1.0"
+edition = "2021"
+description = "Private Rust-only Tauri credential vault backed by the OS keychain"
+
+[dependencies]
+tauri = { version = "2", default-features = false }
+tokio = { version = "1", features = ["rt"] }
+zeroize = "1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust"] }

@@ -1,0 +1,23 @@
+fn main() {
+    println!(
+        "cargo:rustc-env=TAURI_ENV_TARGET_TRIPLE={}",
+        std::env::var("TARGET").unwrap()
+    );
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "get_app_state",
+            "switch_endpoint",
+            "get_public_settings",
+            "login",
+            "complete_two_factor",
+            "logout",
+            "get_groups",
+            "configure",
+            "start_stream",
+            "ack_stream",
+            "cancel_stream",
+            "get_engine_status",
+        ]),
+    ))
+    .expect("Tauri build failed");
+}

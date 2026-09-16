@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ack-stream"
+description = "Enables the ack_stream command without any pre-configured scope."
+commands.allow = ["ack_stream"]
+
+[[permission]]
+identifier = "deny-ack-stream"
+description = "Denies the ack_stream command without any pre-configured scope."
+commands.deny = ["ack_stream"]
