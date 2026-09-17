@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-plugin-mixins"
+description = "Enables the list_plugin_mixins command without any pre-configured scope."
+commands.allow = ["list_plugin_mixins"]
+
+[[permission]]
+identifier = "deny-list-plugin-mixins"
+description = "Denies the list_plugin_mixins command without any pre-configured scope."
+commands.deny = ["list_plugin_mixins"]

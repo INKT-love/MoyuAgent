@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use reqwest::Method;
@@ -23,6 +24,13 @@ pub struct Group {
     pub name: String,
     #[serde(default)]
     pub platform: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupModel {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Serialize)]
@@ -281,6 +289,19 @@ impl AuthService {
         Ok(key)
     }
 
+    pub async fn group_models(
+        &self,
+        group_id: i64,
+        user_id: i64,
+    ) -> Result<Vec<GroupModel>, String> {
+        let key = Zeroizing::new(self.ensure_api_key(group_id, user_id).await?);
+        let payload = self
+            .api
+            .request_json(Method::GET, "/v1/models", Some(key.as_str()), None, None)
+            .await?;
+        Ok(parse_model_list(&payload))
+    }
+
     async fn find_created_key(
         &self,
         name: &str,
@@ -330,6 +351,77 @@ fn nonempty_string(value: &Value, field: &str) -> Result<String, String> {
         .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .ok_or_else(|| format!("The API response is missing {field}"))
+}
+
+const MAX_GROUP_MODELS: usize = 300;
+
+fn valid_model_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty()
+        && id.len() <= 160
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+}
+
+fn model_from_value(value: &Value) -> Option<GroupModel> {
+    match value {
+        Value::String(id) if valid_model_id(id) => Some(GroupModel {
+            id: id.clone(),
+            name: id.clone(),
+        }),
+        Value::Object(_) => {
+            let raw = value
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("name").and_then(Value::as_str))?;
+            let id = raw.strip_prefix("models/").unwrap_or(raw).trim();
+            if !valid_model_id(id) {
+                return None;
+            }
+            let name = value
+                .get("display_name")
+                .or_else(|| value.get("displayName"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id)
+                .to_owned();
+            Some(GroupModel {
+                id: id.to_owned(),
+                name,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_model_list(value: &Value) -> Vec<GroupModel> {
+    let items = value.as_array().map(|items| items.as_slice()).or_else(|| {
+        ["data", "models"].into_iter().find_map(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|items| items.as_slice())
+        })
+    });
+    let Some(items) = items else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+    for item in items {
+        let Some(model) = model_from_value(item) else {
+            continue;
+        };
+        if seen.insert(model.id.clone()) {
+            models.push(model);
+        }
+        if models.len() == MAX_GROUP_MODELS {
+            break;
+        }
+    }
+    models
 }
 
 fn parse_user(value: &Value) -> Result<User, String> {
@@ -382,5 +474,59 @@ mod tests {
     fn rejects_missing_or_empty_credentials_in_responses() {
         assert!(nonempty_string(&json!({ "access_token": " " }), "access_token").is_err());
         assert!(nonempty_string(&json!({ "token": "unsupported" }), "access_token").is_err());
+    }
+
+    #[test]
+    fn parses_openai_and_anthropic_model_lists() {
+        let openai = parse_model_list(&json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-5.2", "object": "model" },
+                { "id": "gpt-5.2" },
+                { "id": "text-embedding-3-large" }
+            ]
+        }));
+        assert_eq!(
+            openai
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.2", "text-embedding-3-large"]
+        );
+
+        let anthropic = parse_model_list(&json!({
+            "data": [
+                { "id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6", "type": "model" },
+                { "id": "not a model" }
+            ]
+        }));
+        assert_eq!(
+            anthropic,
+            [GroupModel {
+                id: "claude-sonnet-4-6".into(),
+                name: "Claude Sonnet 4.6".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_gemini_names_and_plain_id_arrays() {
+        let gemini = parse_model_list(&json!({
+            "models": [{ "name": "models/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro" }]
+        }));
+        assert_eq!(
+            gemini,
+            [GroupModel {
+                id: "gemini-2.5-pro".into(),
+                name: "Gemini 2.5 Pro".into(),
+            }]
+        );
+        assert_eq!(
+            parse_model_list(&json!(["claude-opus-4-6", "claude-opus-4-6"])),
+            [GroupModel {
+                id: "claude-opus-4-6".into(),
+                name: "claude-opus-4-6".into(),
+            }]
+        );
     }
 }

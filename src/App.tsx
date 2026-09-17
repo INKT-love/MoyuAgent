@@ -12,16 +12,19 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  ChevronDown,
   ChevronRight,
   Code2,
   Copy,
   Eye,
   EyeOff,
   Folder,
+  FolderOpen,
   LogOut,
   MessageSquare,
   PanelLeftOpen,
   Plus,
+  RotateCw,
   Settings2,
   ShieldCheck,
   Square,
@@ -30,21 +33,33 @@ import {
   LoaderCircle,
   AlertCircle,
 } from "lucide-solid";
-import Settings, { EndpointSelect } from "./components/Settings";
+import Settings, {
+  EndpointSelect,
+  pluginSettingsTab,
+  type SettingsTab,
+} from "./components/Settings";
 import {
   command,
   defaultModel,
   desktop,
   errorMessage,
+  folderName,
   initialState,
+  pickModel,
   supportedGroups,
   type AppState,
   type ConfigSummary,
   type Endpoint,
   type Group,
+  type GroupModel,
   type LoginResult,
   type PublicSettings,
 } from "./lib/api";
+import {
+  mixins,
+  type PluginMixin,
+  type UiInjection,
+} from "./lib/mixin";
 import {
   createStreamController,
   type StreamEvent,
@@ -73,6 +88,7 @@ export default function App() {
   const [state, setState] = createSignal<AppState>(initialState);
   const [initializing, setInitializing] = createSignal(desktop);
   const [view, setView] = createSignal<"chat" | "settings">("chat");
+  const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("model");
   const [preview, setPreview] = createSignal(false);
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [email, setEmail] = createSignal("");
@@ -97,6 +113,9 @@ export default function App() {
     firstConversation.id,
   );
   const [prompt, setPrompt] = createSignal("");
+  const [mainMixins, setMainMixins] = createSignal<UiInjection[]>([]);
+  const [settingsMixins, setSettingsMixins] = createSignal<UiInjection[]>([]);
+  const [hiddenPluginUi, setHiddenPluginUi] = createSignal<string[]>([]);
   const [streaming, setStreaming] = createSignal(false);
   const [streamStatus, setStreamStatus] = createSignal("");
   const [copiedId, setCopiedId] = createSignal("");
@@ -115,6 +134,8 @@ export default function App() {
   let scrollFrame: number | undefined;
   let disposed = false;
   let agreementDialog: HTMLDialogElement | undefined;
+  let mixinObserver: MutationObserver | undefined;
+  let mixinFrame: number | undefined;
 
   const patchConversation = (
     id: string,
@@ -138,6 +159,29 @@ export default function App() {
       setBusy(false);
     }
   };
+  const refreshMixins = async () => {
+    if (!desktop) return;
+    mixins.reset();
+    try {
+      const list = await command<PluginMixin[]>("list_plugin_mixins");
+      for (const mixin of list) mixins.register(mixin);
+      const pages = mixins.pages();
+      setMainMixins(mixins.overlays());
+      setSettingsMixins(pages);
+      setSettingsTab((tab) =>
+        tab === "endpoint" ||
+        tab === "model" ||
+        tab === "plugins" ||
+        pages.some((page) => pluginSettingsTab(page.id) === tab)
+          ? tab
+          : "plugins",
+      );
+      mixins.applyDom();
+    } catch {
+      setMainMixins([]);
+      setSettingsMixins([]);
+    }
+  };
   onMount(async () => {
     if (!desktop) return;
     try {
@@ -146,6 +190,15 @@ export default function App() {
       await refreshState();
       if (state().authenticated)
         setGroups(supportedGroups(await command<Group[]>("get_groups")));
+      await refreshMixins();
+      mixinObserver = new MutationObserver(() => {
+        if (mixinFrame !== undefined) return;
+        mixinFrame = requestAnimationFrame(() => {
+          mixinFrame = undefined;
+          mixins.applyDom();
+        });
+      });
+      mixinObserver.observe(document.body, { childList: true, subtree: true });
     } catch (err) {
       if (!disposed) setError(errorMessage(err));
     } finally {
@@ -154,6 +207,9 @@ export default function App() {
   });
   onCleanup(() => {
     disposed = true;
+    mixinObserver?.disconnect();
+    if (mixinFrame !== undefined) cancelAnimationFrame(mixinFrame);
+    mixins.reset();
     setPassword("");
     setTotpCode("");
     setTwoFactorToken(null);
@@ -162,19 +218,66 @@ export default function App() {
     if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame);
   });
 
+  let switchingEndpoint = false;
   const switchEndpoint = async (index: number) => {
-    if (streaming()) return;
-    setBusy(true);
+    if (streaming() || switchingEndpoint || state().endpoint.index === index)
+      return;
+    switchingEndpoint = true;
+    const selected = state().endpoints.find((item) => item.index === index);
+    if (selected) setState((current) => ({ ...current, endpoint: selected }));
     setError("");
     try {
       const endpoint = await command<Endpoint>("switch_endpoint", { index });
       setState((current) => ({ ...current, endpoint }));
-      setPublicSettings(await command<PublicSettings>("get_public_settings"));
       await refreshState();
     } catch (err) {
       setError(errorMessage(err));
+      await refreshState().catch(() => undefined);
     } finally {
-      setBusy(false);
+      switchingEndpoint = false;
+    }
+  };
+  const openSettings = (tab: SettingsTab) => {
+    setSettingsTab(tab);
+    setView("settings");
+    setSidebarOpen(false);
+  };
+  const [workspaceMenu, setWorkspaceMenu] = createSignal(false);
+  const chooseWorkspace = async () => {
+    if (!desktop || streaming() || busy() || !state().authenticated) return;
+    setWorkspaceMenu(false);
+    setError("");
+    try {
+      const config = await command<ConfigSummary | null>("choose_workspace");
+      if (config) setState((current) => ({ ...current, config }));
+      await refreshState();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+  const applyWorkspace = async (path: string) => {
+    if (streaming() || busy() || !state().authenticated) return;
+    setWorkspaceMenu(false);
+    setError("");
+    try {
+      const config = await command<ConfigSummary>("configure", {
+        groupId: state().config?.groupId,
+        model: state().config?.model,
+        workspace: path,
+      });
+      setState((current) => ({ ...current, config }));
+      await refreshState();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+  const revealWorkspace = async () => {
+    if (!desktop || !state().config) return;
+    setWorkspaceMenu(false);
+    try {
+      await command<void>("reveal_workspace");
+    } catch (err) {
+      setError(errorMessage(err));
     }
   };
   const login = async (event: SubmitEvent) => {
@@ -210,9 +313,20 @@ export default function App() {
       if (!loggedIn.config && availableGroups.length) {
         setStreamStatus("正在配置工作区");
         const group = availableGroups[0];
+        let model = defaultModel(group);
+        try {
+          model = pickModel(
+            await command<GroupModel[]>("get_group_models", {
+              groupId: group.id,
+            }),
+            model,
+          );
+        } catch {
+          // Keep the platform default if the group catalog is unavailable.
+        }
         const config = await command<ConfigSummary>("configure", {
           groupId: group.id,
-          model: defaultModel(group),
+          model,
           workspace: "",
         });
         setState((current) => ({ ...current, config }));
@@ -277,9 +391,8 @@ export default function App() {
       failActiveStream?.(message);
     }
   };
-  const send = async (event?: SubmitEvent) => {
-    event?.preventDefault();
-    const text = prompt().trim();
+  const sendMessage = async (raw?: unknown) => {
+    const text = String(raw ?? "").trim();
     if (
       !text ||
       streaming() ||
@@ -366,6 +479,26 @@ export default function App() {
       controller.fail(errorMessage(err));
     }
   };
+  const send = async (event?: SubmitEvent, override?: string) => {
+    event?.preventDefault();
+    try {
+      await mixins.invoke(
+        "chat.send",
+        (...args: unknown[]) => sendMessage(args[0]),
+        [override ?? prompt()],
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+  const retry = (assistant: Message) => {
+    const messages = conversation().messages;
+    const index = messages.findIndex((item) => item.id === assistant.id);
+    const user = [...messages.slice(0, index)]
+      .reverse()
+      .find((item) => item.role === "user");
+    if (user) void send(undefined, user.text);
+  };
   const copyMessage = async (message: Message) => {
     try {
       await navigator.clipboard.writeText(message.text);
@@ -394,7 +527,7 @@ export default function App() {
   };
 
   return (
-    <div class="app-shell">
+    <div class="app-shell" onClick={() => setWorkspaceMenu(false)}>
       <Show when={sidebarOpen()}>
         <button
           class="sidebar-backdrop"
@@ -427,27 +560,28 @@ export default function App() {
             <ChevronRight size={14} />
           </span>
         </button>
-        <div class="nav-section-label">工作空间</div>
-        <button
-          classList={{ "nav-button": true, active: view() === "chat" }}
-          onClick={() => {
-            setView("chat");
-            setSidebarOpen(false);
-          }}
-        >
-          <MessageSquare size={17} />
-          对话
-        </button>
-        <button
-          classList={{ "nav-button": true, active: view() === "settings" }}
-          onClick={() => {
-            setView("settings");
-            setSidebarOpen(false);
-          }}
-        >
-          <Settings2 size={17} />
-          设置
-        </button>
+        <div class="sidebar-nav">
+          <button
+            classList={{ "nav-button": true, active: view() === "chat" }}
+            onClick={() => {
+              setView("chat");
+              setSidebarOpen(false);
+            }}
+          >
+            <MessageSquare size={17} />
+            对话
+          </button>
+          <button
+            classList={{ "nav-button": true, active: view() === "settings" }}
+            onClick={() => {
+              setView("settings");
+              setSidebarOpen(false);
+            }}
+          >
+            <Settings2 size={17} />
+            设置
+          </button>
+        </div>
         <div class="history-section">
           <div class="nav-section-label">
             最近任务
@@ -487,19 +621,22 @@ export default function App() {
           </Show>
         </div>
         <div class="sidebar-bottom">
-          <div class="workspace-status">
+          <button
+            type="button"
+            class="workspace-status"
+            title={state().config?.workspace || "选择工作区"}
+            disabled={!state().authenticated || streaming() || busy()}
+            onClick={() => void chooseWorkspace()}
+          >
             <Folder size={16} />
             <div>
               <span>当前工作区</span>
-              <strong title={state().config?.workspace}>
-                {state()
-                  .config?.workspace.split(/[\\/]/)
-                  .filter(Boolean)
-                  .at(-1) || "未配置"}
+              <strong>
+                {folderName(state().config?.workspace) || "未配置"}
               </strong>
             </div>
             <span classList={{ "status-dot": true, ready: !!state().config }} />
-          </div>
+          </button>
           <div class="account-row">
             <span class="avatar">
               {state().user?.email.charAt(0).toUpperCase() || "M"}
@@ -535,11 +672,30 @@ export default function App() {
             >
               <PanelLeftOpen size={19} />
             </button>
-            <span class="breadcrumb-root">工作空间</span>
-            <ChevronRight size={13} />
-            <strong>{view() === "settings" ? "设置" : "对话"}</strong>
+            <div class="topbar-title">
+              <span class="eyebrow">
+                {view() === "settings" ? "PREFERENCES" : "WORKSPACE"}
+              </span>
+              <strong>
+                {view() === "settings"
+                  ? "设置"
+                  : conversation().messages.length
+                    ? conversation().title
+                    : "新任务"}
+              </strong>
+            </div>
           </div>
           <div class="topbar-actions">
+            <Show when={state().authenticated && view() === "chat"}>
+              <button
+                class="topbar-chip"
+                title="打开设置"
+                onClick={() => openSettings("model")}
+              >
+                <span classList={{ "status-dot": true, ready: !!state().config }} />
+                {state().config?.model || "尚未配置模型"}
+              </button>
+            </Show>
             <span
               classList={{
                 "connection-state": true,
@@ -556,7 +712,7 @@ export default function App() {
             <EndpointSelect
               endpoint={state().endpoint}
               endpoints={state().endpoints}
-              disabled={!desktop || busy() || streaming()}
+              disabled={!desktop || streaming()}
               onChange={(index) => void switchEndpoint(index)}
             />
           </div>
@@ -755,20 +911,6 @@ export default function App() {
                 }
               >
                 <div class="chat-pane">
-                  <div class="conversation-heading">
-                    <div>
-                      <span class="eyebrow">WORKSPACE</span>
-                      <h1>
-                        {conversation().messages.length
-                          ? conversation().title
-                          : "新任务"}
-                      </h1>
-                    </div>
-                    <span class="model-label">
-                      <span class="status-dot ready" />
-                      {state().config?.model || "尚未配置模型"}
-                    </span>
-                  </div>
                   <div
                     class="transcript"
                     ref={transcript}
@@ -789,14 +931,20 @@ export default function App() {
                           </div>
                           <h2>今天，从哪里开始？</h2>
                           <span>
-                            {state().config?.workspace || "工作区尚未配置"}
+                            {state().config
+                              ? `${state().config?.model} · ${
+                                  folderName(state().config?.workspace) ||
+                                  "默认工作区"
+                                }`
+                              : "工作区尚未配置"}
                           </span>
-                          <Show when={!state().config}>
+                          <Show when={state().authenticated}>
                             <button
                               class="text-button"
-                              onClick={() => setView("settings")}
+                              disabled={streaming() || busy()}
+                              onClick={() => void chooseWorkspace()}
                             >
-                              配置工作区
+                              选择工作区
                               <ChevronRight size={15} />
                             </button>
                           </Show>
@@ -869,23 +1017,40 @@ export default function App() {
                                 <Show
                                   when={
                                     message.role === "assistant" &&
-                                    message.state !== "streaming" &&
-                                    message.text
+                                    message.state !== "streaming"
                                   }
                                 >
                                   <div class="message-tools">
-                                    <button
-                                      class="icon-button"
-                                      title="复制回复"
-                                      aria-label="复制回复"
-                                      onClick={() => void copyMessage(message)}
+                                    <Show when={message.text}>
+                                      <button
+                                        class="icon-button"
+                                        title="复制回复"
+                                        aria-label="复制回复"
+                                        onClick={() => void copyMessage(message)}
+                                      >
+                                        {copiedId() === message.id ? (
+                                          <Check size={14} />
+                                        ) : (
+                                          <Copy size={14} />
+                                        )}
+                                      </button>
+                                    </Show>
+                                    <Show
+                                      when={
+                                        message.state === "failed" ||
+                                        message.state === "cancelled"
+                                      }
                                     >
-                                      {copiedId() === message.id ? (
-                                        <Check size={14} />
-                                      ) : (
-                                        <Copy size={14} />
-                                      )}
-                                    </button>
+                                      <button
+                                        class="icon-button"
+                                        title="重试任务"
+                                        aria-label="重试任务"
+                                        disabled={streaming() || busy()}
+                                        onClick={() => retry(message)}
+                                      >
+                                        <RotateCw size={14} />
+                                      </button>
+                                    </Show>
                                   </div>
                                 </Show>
                               </div>
@@ -944,13 +1109,97 @@ export default function App() {
                       />
                       <div class="composer-toolbar">
                         <div class="composer-context">
-                          <Folder size={14} />
-                          <span>
-                            {state()
-                              .config?.workspace.split(/[\\/]/)
-                              .filter(Boolean)
-                              .at(-1) || "未选择工作区"}
-                          </span>
+                          <div class="workspace-picker">
+                            <button
+                              type="button"
+                              class="composer-chip"
+                              title={
+                                state().config?.workspace || "选择工作区"
+                              }
+                              aria-label="选择工作区"
+                              disabled={
+                                !state().authenticated ||
+                                streaming() ||
+                                busy()
+                              }
+                              onClick={() => void chooseWorkspace()}
+                            >
+                              <Folder size={13} />
+                              <span>
+                                {folderName(state().config?.workspace) ||
+                                  "选择工作区"}
+                              </span>
+                            </button>
+                            <Show
+                              when={
+                                state().config ||
+                                (state().recentWorkspaces?.length ?? 0) > 0
+                              }
+                            >
+                              <button
+                                type="button"
+                                class="composer-chip-more"
+                                title="工作区选项"
+                                aria-label="工作区选项"
+                                aria-expanded={workspaceMenu()}
+                                disabled={
+                                  !state().authenticated ||
+                                  streaming() ||
+                                  busy()
+                                }
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setWorkspaceMenu((open) => !open);
+                                }}
+                              >
+                                <ChevronDown size={13} />
+                              </button>
+                            </Show>
+                            <Show when={workspaceMenu()}>
+                              <div class="workspace-menu" role="menu">
+                                <For
+                                  each={(state().recentWorkspaces ?? []).filter(
+                                    (path) =>
+                                      path !== state().config?.workspace,
+                                  )}
+                                >
+                                  {(path) => (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      title={path}
+                                      onClick={() => void applyWorkspace(path)}
+                                    >
+                                      {folderName(path) || path}
+                                    </button>
+                                  )}
+                                </For>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={!state().config}
+                                  onClick={() => void revealWorkspace()}
+                                >
+                                  <FolderOpen size={13} />
+                                  在资源管理器中打开
+                                </button>
+                              </div>
+                            </Show>
+                          </div>
+                          <button
+                            type="button"
+                            class="composer-chip"
+                            title="模型"
+                            onClick={() => openSettings("model")}
+                          >
+                            <span
+                              classList={{
+                                "status-dot": true,
+                                ready: !!state().config?.model,
+                              }}
+                            />
+                            <span>{state().config?.model || "尚未配置模型"}</span>
+                          </button>
                         </div>
                         <Show
                           when={streaming()}
@@ -1009,15 +1258,66 @@ export default function App() {
               groups={groups()}
               busy={busy()}
               streaming={streaming()}
+              tab={settingsTab()}
+              pages={settingsMixins()}
+              onTab={setSettingsTab}
               onEndpoint={switchEndpoint}
               onConfigured={(config) =>
                 setState((current) => ({ ...current, config }))
               }
               onRefreshGroups={refreshGroups}
+              onPluginsChange={() => void refreshMixins()}
             />
           </Show>
         </Show>
       </main>
+      <Show when={mainMixins().length}>
+        <div class="plugin-ui-layer">
+          <For each={mainMixins()}>
+            {(plugin) => (
+              <Show
+                when={!hiddenPluginUi().includes(plugin.id)}
+                fallback={
+                  <button
+                    type="button"
+                    class="plugin-ui-chip"
+                    onClick={() =>
+                      setHiddenPluginUi((ids) =>
+                        ids.filter((id) => id !== plugin.id),
+                      )
+                    }
+                  >
+                    {plugin.name}
+                  </button>
+                }
+              >
+                <section class="plugin-ui-panel">
+                  <header>
+                    <strong>{plugin.name}</strong>
+                    <span>Mixin</span>
+                    <button
+                      type="button"
+                      class="icon-button"
+                      title="收起"
+                      aria-label={`收起 ${plugin.name}`}
+                      onClick={() =>
+                        setHiddenPluginUi((ids) => [...ids, plugin.id])
+                      }
+                    >
+                      <X size={14} />
+                    </button>
+                  </header>
+                  <iframe
+                    title={plugin.name}
+                    srcdoc={plugin.html}
+                    sandbox="allow-scripts"
+                  />
+                </section>
+              </Show>
+            )}
+          </For>
+        </div>
+      </Show>
       <dialog ref={agreementDialog} class="agreement-dialog" aria-labelledby="agreement-title">
         <div class="dialog-heading"><h2 id="agreement-title">服务协议</h2><button type="button" class="icon-button" aria-label="关闭协议" title="关闭协议" onClick={() => agreementDialog?.close()}><X size={18} /></button></div>
         <For each={publicSettings().agreementDocuments ?? []}>{document => <section><h3>{document.title}</h3><div class="agreement-content">{document.content}</div></section>}</For>

@@ -3,8 +3,9 @@ mod services;
 use serde::Serialize;
 use services::{
     api_client::{self, ApiClient, Endpoint},
-    auth::{self, AuthService, Group, LoginResult, User},
+    auth::{self, AuthService, Group, GroupModel, LoginResult, User},
     config::{self, ConfigSummary, Preferences},
+    harness::{self, PluginInfo, PluginMixin, PluginUi},
     opencode::{Engine, EngineHealth, RunEnvironment, RunRequest},
     stream::StreamEvent,
 };
@@ -31,6 +32,7 @@ impl AppState {
         self.services
             .get_or_try_init(|| async {
                 let preferences = config::load(app).await?;
+                harness::seed_bundled(app).await?;
                 let api = Arc::new(ApiClient::new(preferences.endpoint_index.min(1))?);
                 Ok(Services {
                     auth: AuthService::new(api.clone()),
@@ -53,16 +55,13 @@ struct Snapshot {
     authenticated: bool,
     user: Option<User>,
     config: Option<ConfigSummary>,
+    recent_workspaces: Vec<String>,
 }
 
 impl Services {
-    async fn snapshot(&self, app: &AppHandle) -> Result<Snapshot, String> {
+    async fn snapshot(&self) -> Result<Snapshot, String> {
         let user = self.user.lock().await.clone();
-        let mut prefs = self.preferences.lock().await;
-        if prefs.endpoint_index != self.api.endpoint().index {
-            prefs.endpoint_index = self.api.endpoint().index;
-            config::save(app, prefs.clone()).await?;
-        }
+        let prefs = self.preferences.lock().await;
         let config = prefs
             .config
             .clone()
@@ -73,6 +72,7 @@ impl Services {
             authenticated: user.is_some(),
             user,
             config,
+            recent_workspaces: prefs.recent_workspaces.clone(),
         })
     }
 
@@ -82,6 +82,17 @@ impl Services {
                 return Err("Stop the current response before changing configuration".into());
             }
         }
+        Ok(())
+    }
+
+    async fn write_agent_config(
+        &self,
+        app: &AppHandle,
+        summary: &ConfigSummary,
+        base_url: &str,
+    ) -> Result<(), String> {
+        let enabled = self.preferences.lock().await.enabled_plugins.clone();
+        config::write_opencode_config(app, summary, base_url, &enabled).await?;
         Ok(())
     }
 
@@ -113,7 +124,7 @@ async fn get_app_state(app: AppHandle, state: State<'_, AppState>) -> Result<Sna
         };
         *services.user.lock().await = user;
     }
-    services.snapshot(&app).await
+    services.snapshot().await
 }
 
 #[tauri::command]
@@ -129,8 +140,12 @@ async fn switch_endpoint(
     let mut prefs = services.preferences.lock().await;
     prefs.endpoint_index = index;
     config::save(&app, prefs.clone()).await?;
-    if let Some(config) = &prefs.config {
-        config::write_opencode_config(&app, config, &endpoint.base_url).await?;
+    let summary = prefs.config.clone();
+    drop(prefs);
+    if let Some(config) = summary {
+        services
+            .write_agent_config(&app, &config, &endpoint.base_url)
+            .await?;
     }
     Ok(endpoint)
 }
@@ -159,7 +174,6 @@ async fn get_public_settings(
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
     let settings = services.auth.public_settings().await?;
-    let _ = services.snapshot(&app).await?;
     Ok(PublicSettings {
         login_agreement_required: settings["login_agreement_enabled"]
             .as_bool()
@@ -197,7 +211,6 @@ async fn login(
     }
     let result = services.auth.login(email, password, None, None).await?;
     *services.user.lock().await = result.user.clone();
-    let _ = services.snapshot(&app).await?;
     Ok(result)
 }
 
@@ -221,7 +234,6 @@ async fn complete_two_factor(
         )
         .await?;
     *services.user.lock().await = result.user.clone();
-    let _ = services.snapshot(&app).await?;
     Ok(result)
 }
 
@@ -242,11 +254,34 @@ async fn get_groups(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Gr
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
     let groups = services.auth.groups().await?;
-    let _ = services.snapshot(&app).await?;
     Ok(groups
         .into_iter()
         .filter(|g| matches!(g.platform.as_str(), "anthropic" | "claude" | "openai"))
         .collect())
+}
+
+#[tauri::command]
+async fn get_group_models(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    group_id: i64,
+) -> Result<Vec<GroupModel>, String> {
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let user = services
+        .auth
+        .current_user()
+        .await?
+        .ok_or("Sign in before listing models")?;
+    *services.user.lock().await = Some(user.clone());
+    let groups = services.auth.groups().await?;
+    let allowed = groups.iter().any(|group| {
+        group.id == group_id && matches!(group.platform.as_str(), "anthropic" | "claude" | "openai")
+    });
+    if !allowed {
+        return Err("The selected group is not available for this account".into());
+    }
+    services.auth.group_models(group_id, user.id).await
 }
 
 #[tauri::command]
@@ -302,13 +337,212 @@ async fn configure(
         working_directory: directory.to_string_lossy().into_owned(),
         user_id: user.id,
     };
-    config::write_opencode_config(&app, &summary, services.api.get_current_base_url()).await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    config::write_opencode_config(
+        &app,
+        &summary,
+        services.api.get_current_base_url(),
+        &enabled,
+    )
+    .await?;
     let mut prefs = services.preferences.lock().await;
     prefs.config = Some(summary.clone());
     prefs.endpoint_index = services.api.endpoint().index;
+    config::remember_workspace(&mut prefs, summary.working_directory.clone());
     config::save(&app, prefs.clone()).await?;
     *services.engine.lock().await = None;
     Ok(summary)
+}
+
+async fn pick_folder_path(
+    app: &AppHandle,
+    title: &str,
+    start: Option<String>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let mut dialog = app.dialog().file().set_title(title);
+    if let Some(directory) = start.filter(|path| !path.trim().is_empty()) {
+        dialog = dialog.set_directory(directory);
+    }
+    dialog.pick_folder(move |folder| {
+        let _ = sender.send(folder.map(|file| file.into_path()));
+    });
+    match receiver
+        .await
+        .map_err(|_| "Folder picker was interrupted".to_owned())?
+    {
+        None => Ok(None),
+        Some(Ok(path)) => Ok(Some(path)),
+        Some(Err(error)) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn choose_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ConfigSummary>, String> {
+    let services = state.services(&app).await?;
+    services.ensure_idle().await?;
+    let current = services
+        .preferences
+        .lock()
+        .await
+        .config
+        .as_ref()
+        .map(|config| config.working_directory.clone());
+    let Some(path) = pick_folder_path(&app, "选择工作区", current).await? else {
+        return Ok(None);
+    };
+    let workspace = path.to_string_lossy().into_owned();
+    let (group_id, model) = {
+        let prefs = services.preferences.lock().await;
+        prefs
+            .config
+            .as_ref()
+            .map(|config| (Some(config.group_id), Some(config.model.clone())))
+            .unwrap_or((None, None))
+    };
+    Ok(Some(
+        configure(app, state, group_id, model, Some(workspace)).await?,
+    ))
+}
+
+#[tauri::command]
+async fn reveal_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let services = state.services(&app).await?;
+    let path = services
+        .preferences
+        .lock()
+        .await
+        .config
+        .as_ref()
+        .map(|config| config.working_directory.clone())
+        .ok_or_else(|| "Choose a workspace before opening it".to_owned())?;
+    tokio::task::spawn_blocking(move || open::that(&path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_plugins(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PluginInfo>, String> {
+    let services = state.services(&app).await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    harness::list_plugins(&app, &enabled).await
+}
+
+#[tauri::command]
+async fn install_plugin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PluginInfo>, String> {
+    let services = state.services(&app).await?;
+    services.ensure_idle().await?;
+    let Some(source) = pick_folder_path(&app, "选择插件目录", None).await? else {
+        return harness::list_plugins(&app, &services.preferences.lock().await.enabled_plugins)
+            .await;
+    };
+    let id = harness::install_from_directory(&app, &source).await?;
+    let mut prefs = services.preferences.lock().await;
+    if !prefs.enabled_plugins.iter().any(|item| item == &id) {
+        prefs.enabled_plugins.push(id);
+    }
+    let enabled = prefs.enabled_plugins.clone();
+    let summary = prefs.config.clone();
+    config::save(&app, prefs.clone()).await?;
+    drop(prefs);
+    if let Some(summary) = summary {
+        services
+            .write_agent_config(&app, &summary, services.api.get_current_base_url())
+            .await?;
+        *services.engine.lock().await = None;
+    }
+    harness::list_plugins(&app, &enabled).await
+}
+
+#[tauri::command]
+async fn set_plugin_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<Vec<PluginInfo>, String> {
+    if !harness::valid_plugin_id(&id) {
+        return Err("Invalid plugin id".into());
+    }
+    let services = state.services(&app).await?;
+    services.ensure_idle().await?;
+    let mut prefs = services.preferences.lock().await;
+    if enabled {
+        if !prefs.enabled_plugins.iter().any(|item| item == &id) {
+            prefs.enabled_plugins.push(id);
+        }
+    } else {
+        prefs.enabled_plugins.retain(|item| item != &id);
+    }
+    let enabled_ids = prefs.enabled_plugins.clone();
+    let summary = prefs.config.clone();
+    config::save(&app, prefs.clone()).await?;
+    drop(prefs);
+    if let Some(summary) = summary {
+        services
+            .write_agent_config(&app, &summary, services.api.get_current_base_url())
+            .await?;
+        *services.engine.lock().await = None;
+    }
+    harness::list_plugins(&app, &enabled_ids).await
+}
+
+#[tauri::command]
+async fn uninstall_plugin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<PluginInfo>, String> {
+    if !harness::valid_plugin_id(&id) {
+        return Err("Invalid plugin id".into());
+    }
+    let services = state.services(&app).await?;
+    services.ensure_idle().await?;
+    harness::uninstall(&app, &id).await?;
+    let mut prefs = services.preferences.lock().await;
+    prefs.enabled_plugins.retain(|item| item != &id);
+    let enabled = prefs.enabled_plugins.clone();
+    let summary = prefs.config.clone();
+    config::save(&app, prefs.clone()).await?;
+    drop(prefs);
+    if let Some(summary) = summary {
+        services
+            .write_agent_config(&app, &summary, services.api.get_current_base_url())
+            .await?;
+        *services.engine.lock().await = None;
+    }
+    harness::list_plugins(&app, &enabled).await
+}
+
+#[tauri::command]
+async fn list_plugin_uis(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PluginUi>, String> {
+    let services = state.services(&app).await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    harness::list_plugin_uis(&app, &enabled).await
+}
+
+#[tauri::command]
+async fn list_plugin_mixins(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PluginMixin>, String> {
+    let services = state.services(&app).await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    harness::list_plugin_mixins(&app, &enabled).await
 }
 
 #[tauri::command]
@@ -343,7 +577,14 @@ async fn start_stream(
     ))
     .await?
     .ok_or("The API key is unavailable. Run configuration again.")?;
-    config::write_opencode_config(&app, &summary, services.api.get_current_base_url()).await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    config::write_opencode_config(
+        &app,
+        &summary,
+        services.api.get_current_base_url(),
+        &enabled,
+    )
+    .await?;
     let engine = services.engine(&app, &summary).await?;
     engine
         .start(
@@ -412,6 +653,7 @@ pub fn run() {
         .init();
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_secure_store::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
@@ -422,7 +664,16 @@ pub fn run() {
             complete_two_factor,
             logout,
             get_groups,
+            get_group_models,
             configure,
+            choose_workspace,
+            reveal_workspace,
+            list_plugins,
+            install_plugin,
+            set_plugin_enabled,
+            uninstall_plugin,
+            list_plugin_uis,
+            list_plugin_mixins,
             start_stream,
             ack_stream,
             cancel_stream,

@@ -20,6 +20,8 @@ On this Windows workspace, a portable Microsoft compiler/SDK is already availabl
 
 The script loads the local compiler environment and can reuse the existing Vite server. The browser preview is at `http://127.0.0.1:1420`; account operations and the agent require the desktop app. No real credentials are supplied in tests or previews.
 
+Plugin authoring (no Agent code changes, CSS `select` mixins, OpenCode patches) is in [docs/plugins.md](docs/plugins.md).
+
 Production build, after preparing the sidecar for the current host:
 
 ```sh

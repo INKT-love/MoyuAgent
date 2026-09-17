@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        font-family: "DM Sans", "Noto Sans SC", system-ui, sans-serif;
+        color: #355a43;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: #fcfdfc;
+      }
+      body {
+        padding: 18px 18px 20px;
+      }
+      .kicker {
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        color: #8a988f;
+        margin-bottom: 6px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 16px;
+        font-weight: 600;
+        color: #315941;
+      }
+      p {
+        margin: 0 0 16px;
+        font-size: 12px;
+        color: #5d7265;
+        line-height: 1.6;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+      .chip {
+        height: 28px;
+        padding: 0 10px;
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        background: #eef3f0;
+        color: #276554;
+        font-size: 11px;
+      }
+      button {
+        height: 32px;
+        padding: 0 12px;
+        border: 0;
+        border-radius: 8px;
+        background: #276554;
+        color: #fff;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button:hover { background: #1e4d3f; }
+      .count {
+        margin-left: 10px;
+        font-size: 12px;
+        color: #5d7265;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="kicker">MIXIN · UI.SETTINGS</div>
+    <h1>设置测试页</h1>
+    <p>这个页面由 lab 插件混入设置，用来确认宿主接入点可以长出完整页，而不只是浮层。</p>
+    <div class="row">
+      <span class="chip">接入点 ui.settings</span>
+      <span class="chip">at RETURN</span>
+    </div>
+    <button type="button" id="ping">点一下</button>
+    <span class="count">计数 <strong id="n">0</strong></span>
+    <script>
+      let n = 0;
+      document.getElementById("ping").addEventListener("click", () => {
+        n += 1;
+        document.getElementById("n").textContent = String(n);
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "id": "reviewer",
+  "name": "审查模式",
+  "description": "默认以代码审查视角工作：先找风险再动手。",
+  "version": "0.1.0"
+}

@@ -96,6 +96,8 @@ impl ApiClient {
             return Err("Invalid API request path".to_owned());
         }
         let first = self.current.load(Ordering::Acquire);
+        // Retry the other host once. Leave the selected line unchanged so a
+        // later probe cannot undo a manual switch.
         for attempt in 0..2 {
             let index = (first + attempt) % self.base_urls.len();
             let mut request = self
@@ -114,7 +116,6 @@ impl ApiClient {
                 Ok(mut response) => {
                     let status = response.status();
                     if attempt == 0 && matches!(status.as_u16(), 502..=504) {
-                        self.failover(first);
                         continue;
                     }
                     if !status.is_success() {
@@ -145,7 +146,6 @@ impl ApiClient {
                     }
                     if read_failed {
                         if attempt == 0 {
-                            self.failover(first);
                             continue;
                         }
                         return Err(
@@ -168,7 +168,6 @@ impl ApiClient {
                     if attempt == 0
                         && (error.is_connect() || error.is_timeout() || error.is_request())
                     {
-                        self.failover(first);
                         continue;
                     }
                     return Err(
@@ -178,13 +177,6 @@ impl ApiClient {
             }
         }
         Err("Both API endpoints are unavailable".to_owned())
-    }
-
-    fn failover(&self, failed: usize) {
-        // A request that started earlier must not override a manual switch.
-        let _ =
-            self.current
-                .compare_exchange(failed, 1 - failed, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -266,7 +258,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["id"], 42);
-        assert_eq!(api.endpoint().index, 1);
+        assert_eq!(api.endpoint().index, 0);
         assert!(first
             .await
             .unwrap()
@@ -307,8 +299,24 @@ mod tests {
             .await
             .unwrap()
             .is_array());
-        assert_eq!(api.endpoint().index, 1);
+        assert_eq!(api.endpoint().index, 0);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_switch_survives_failed_primary_probe() {
+        let (primary, first) = server(503, "{}").await;
+        let (backup, second) = server(200, r#"{"code":0,"data":{"ok":true}}"#).await;
+        let api = ApiClient::with_urls(1, [primary, backup]).unwrap();
+        assert_eq!(api.switch_endpoint(Some(0)).unwrap().index, 0);
+        let result = api
+            .request_json(Method::GET, "/api/v1/settings/public", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(api.endpoint().index, 0);
+        first.await.unwrap();
+        second.await.unwrap();
     }
 
     #[tokio::test]

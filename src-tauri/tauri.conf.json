@@ -12,8 +12,14 @@
   "app": {
     "windows": [{"label": "main", "title": "Moyu Agent", "width": 1200, "height": 820, "minWidth": 360, "minHeight": 540}],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'self' blob: data:"
     }
   },
-  "bundle": {"active": true, "targets": "all", "externalBin": ["binaries/opencode"], "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]}
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/opencode"],
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "resources": ["resources/harness"]
+  }
 }

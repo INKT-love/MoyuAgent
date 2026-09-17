@@ -1,0 +1,9 @@
+{
+  "id": "lab",
+  "name": "测试页",
+  "description": "对着 .settings-page 混入一个设置页，不必登记注入点。",
+  "version": "0.1.0",
+  "mixins": [
+    { "select": ".settings-page", "html": "page.html" }
+  ]
+}

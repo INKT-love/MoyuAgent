@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -465,6 +465,14 @@ impl Engine {
                 .current_dir(&self.working_dir)
                 .env("OPENCODE_CONFIG", &environment.config_path)
                 .env("SUB2API_API_KEY", &environment.api_key)
+                .env(
+                    "MOYU_HARNESS_INSTRUCTIONS_FILE",
+                    environment
+                        .config_path
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join("harness-instructions.md"),
+                )
                 .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
                 .env("OPENCODE_DISABLE_TERMINAL_TITLE", "true")
                 .env("NO_COLOR", "1")

@@ -10,6 +10,26 @@ export interface Group {
   name: string;
   platform?: string;
 }
+export interface GroupModel {
+  id: string;
+  name: string;
+}
+export interface PluginInfo {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  enabled: boolean;
+  bundled: boolean;
+  hasModule: boolean;
+  hasInstructions: boolean;
+  hasUi: boolean;
+}
+export interface PluginUi {
+  id: string;
+  name: string;
+  html: string;
+}
 export interface ConfigSummary {
   groupId: number;
   groupName: string;
@@ -23,6 +43,7 @@ export interface AppState {
   authenticated: boolean;
   user: { email: string } | null;
   config: ConfigSummary | null;
+  recentWorkspaces?: string[];
 }
 export interface PublicSettings {
   loginAgreementRequired: boolean;
@@ -76,6 +97,16 @@ export function defaultModel(group?: Group): string {
     default:
       return "claude-sonnet-4-6";
   }
+}
+
+export function folderName(path?: string): string {
+  return path?.split(/[\\/]/).filter(Boolean).at(-1) || "";
+}
+
+export function pickModel(models: GroupModel[], preferred?: string): string {
+  if (preferred && models.some((model) => model.id === preferred))
+    return preferred;
+  return models[0]?.id ?? preferred ?? "";
 }
 
 export function supportedGroups(groups: Group[]): Group[] {

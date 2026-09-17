@@ -87,6 +87,34 @@ try {
             return;
           case "get_groups":
             return [{ id: 1, name: "默认分组", platform: "anthropic" }];
+          case "get_group_models":
+            return [{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" }];
+          case "choose_workspace":
+            snapshot = {
+              ...snapshot,
+              config: {
+                ...(snapshot.config || {
+                  groupId: 1,
+                  groupName: "默认分组",
+                  model: "claude-sonnet-4-6",
+                  configPath: "D:/app-data/opencode.json",
+                }),
+                workspace: "D:/picked",
+              },
+            };
+            return snapshot.config;
+          case "reveal_workspace":
+            return;
+          case "list_plugins":
+            return [];
+          case "list_plugin_uis":
+            return [];
+          case "list_plugin_mixins":
+            return [];
+          case "install_plugin":
+          case "set_plugin_enabled":
+          case "uninstall_plugin":
+            return [];
           case "switch_endpoint":
             snapshot = { ...snapshot, endpoint: endpoints[payload.index] };
             return snapshot.endpoint;

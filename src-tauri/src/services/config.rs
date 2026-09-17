@@ -23,6 +23,10 @@ pub struct Preferences {
     #[serde(default)]
     pub endpoint_index: usize,
     pub config: Option<ConfigSummary>,
+    #[serde(default)]
+    pub recent_workspaces: Vec<String>,
+    #[serde(default)]
+    pub enabled_plugins: Vec<String>,
 }
 
 pub async fn load(app: &AppHandle) -> Result<Preferences, String> {
@@ -119,9 +123,11 @@ pub async fn write_opencode_config(
     app: &AppHandle,
     config: &ConfigSummary,
     base_url: &str,
+    enabled_plugins: &[String],
 ) -> Result<Value, String> {
     let bridge = write_bridge(app).await?;
-    let content = opencode_config(config, base_url, &bridge)?;
+    let mut content = opencode_config(config, base_url, &bridge)?;
+    super::harness::apply_to_opencode(app, &mut content, enabled_plugins).await?;
     tokio::fs::write(
         &config.config_path,
         serde_json::to_vec_pretty(&content).map_err(|e| e.to_string())?,
@@ -129,6 +135,12 @@ pub async fn write_opencode_config(
     .await
     .map_err(|e| format!("Cannot write OpenCode configuration: {e}"))?;
     Ok(content)
+}
+
+pub fn remember_workspace(preferences: &mut Preferences, path: String) {
+    preferences.recent_workspaces.retain(|item| item != &path);
+    preferences.recent_workspaces.insert(0, path);
+    preferences.recent_workspaces.truncate(8);
 }
 
 pub async fn working_directory(
@@ -210,6 +222,18 @@ mod tests {
         assert_eq!(
             value["provider"]["sub2api"]["options"]["baseURL"],
             "https://inkaicf.flymiku.top/v1"
+        );
+    }
+
+    #[test]
+    fn remember_workspace_keeps_newest_unique_paths() {
+        let mut preferences = Preferences::default();
+        remember_workspace(&mut preferences, r"D:\alpha".into());
+        remember_workspace(&mut preferences, r"D:\beta".into());
+        remember_workspace(&mut preferences, r"D:\alpha".into());
+        assert_eq!(
+            preferences.recent_workspaces,
+            [r"D:\alpha".to_owned(), r"D:\beta".to_owned()]
         );
     }
 }

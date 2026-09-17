@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-plugin-uis"
+description = "Enables the list_plugin_uis command without any pre-configured scope."
+commands.allow = ["list_plugin_uis"]
+
+[[permission]]
+identifier = "deny-list-plugin-uis"
+description = "Denies the list_plugin_uis command without any pre-configured scope."
+commands.deny = ["list_plugin_uis"]

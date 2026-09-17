@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-group-models"
+description = "Enables the get_group_models command without any pre-configured scope."
+commands.allow = ["get_group_models"]
+
+[[permission]]
+identifier = "deny-get-group-models"
+description = "Denies the get_group_models command without any pre-configured scope."
+commands.deny = ["get_group_models"]

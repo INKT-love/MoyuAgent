@@ -1,0 +1,7 @@
+{
+  "agent": {
+    "build": {
+      "description": "Reviews code for defects before editing"
+    }
+  }
+}

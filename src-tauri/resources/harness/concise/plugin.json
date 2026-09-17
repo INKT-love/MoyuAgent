@@ -1,0 +1,6 @@
+{
+  "id": "concise",
+  "name": "简洁模式",
+  "description": "缩短默认 Agent 的回复：少铺垫，直接改代码。",
+  "version": "0.1.0"
+}

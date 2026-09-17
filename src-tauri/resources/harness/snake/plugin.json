@@ -1,0 +1,10 @@
+{
+  "id": "snake",
+  "name": "贪吃蛇",
+  "description": "对着现有界面用 CSS 选择器混入，用来测试不必写注入点。",
+  "version": "0.1.0",
+  "mixins": [
+    { "html": "ui.html" },
+    { "select": ".composer-context", "at": "RETURN", "html": "badge.html" }
+  ]
+}
