@@ -3,6 +3,7 @@ import {
   createMemo,
   createSignal,
   For,
+  on,
   onCleanup,
   onMount,
   Show,
@@ -20,6 +21,7 @@ import {
   EyeOff,
   Folder,
   FolderOpen,
+  FolderPlus,
   LogOut,
   MessageSquare,
   PanelLeftOpen,
@@ -39,6 +41,7 @@ import Settings, {
   type SettingsTab,
 } from "./components/Settings";
 import WindowControls from "./components/WindowControls";
+import { workspaceKey } from "./lib/workspaces";
 import {
   command,
   defaultModel,
@@ -79,11 +82,15 @@ interface Conversation {
   title: string;
   messages: Message[];
   sessionId?: string;
+  workspace: string;
+  draft: string;
 }
-const newConversation = (): Conversation => ({
+const newConversation = (workspace = ""): Conversation => ({
   id: crypto.randomUUID(),
   title: "新任务",
   messages: [],
+  workspace,
+  draft: "",
 });
 
 export default function App() {
@@ -122,10 +129,24 @@ export default function App() {
   const [streamStatus, setStreamStatus] = createSignal("");
   const [copiedId, setCopiedId] = createSignal("");
   const [nearBottom, setNearBottom] = createSignal(true);
+  const [workspaceBusy, setWorkspaceBusy] = createSignal(false);
+  const lastConversation = new Map<string, string>();
   const conversation = createMemo(
     () =>
       conversations().find((item) => item.id === activeConversationId()) ??
       conversations()[0],
+  );
+  const workspaces = createMemo(() => {
+    if (!state().authenticated) return [];
+    const paths = [
+      ...(state().recentWorkspaces ?? []),
+      ...conversations().map((item) => item.workspace),
+      state().config?.workspace ?? "",
+    ].filter(Boolean);
+    return [...new Map(paths.map((path) => [workspaceKey(path), path])).values()];
+  });
+  const workspaceConversations = (path: string) => conversations().filter(
+    (item) => item.messages.length && workspaceKey(item.workspace) === workspaceKey(path),
   );
   let transcript: HTMLDivElement | undefined;
   let composer: HTMLTextAreaElement | undefined;
@@ -146,6 +167,30 @@ export default function App() {
     setConversations((items) =>
       items.map((item) => (item.id === id ? patch(item) : item)),
     );
+  const activateConversation = (next: Conversation) => {
+    patchConversation(activeConversationId(), (item) => ({ ...item, draft: prompt() }));
+    setActiveConversationId(next.id);
+    setPrompt(next.draft);
+    lastConversation.set(workspaceKey(next.workspace), next.id);
+    setNearBottom(true);
+  };
+  createEffect(on(() => state().config?.workspace, (workspace) => {
+    if (!workspace) return;
+    const current = conversation();
+    if (!current.workspace) {
+      patchConversation(current.id, (item) => ({ ...item, workspace }));
+      lastConversation.set(workspaceKey(workspace), current.id);
+    } else if (workspaceKey(current.workspace) !== workspaceKey(workspace)) {
+      const previousId = lastConversation.get(workspaceKey(workspace));
+      let next = conversations().find((item) => item.id === previousId)
+        ?? conversations().find((item) => workspaceKey(item.workspace) === workspaceKey(workspace));
+      if (!next) {
+        next = newConversation(workspace);
+        setConversations((items) => [next!, ...items]);
+      }
+      activateConversation(next);
+    }
+  }));
   const refreshState = async () => {
     const next = await command<AppState>("get_app_state");
     if (!disposed) setState(next);
@@ -248,21 +293,34 @@ export default function App() {
   };
   const [workspaceMenu, setWorkspaceMenu] = createSignal(false);
   const chooseWorkspace = async () => {
-    if (!desktop || streaming() || busy() || !state().authenticated) return;
+    if (!desktop || streaming() || busy() || workspaceBusy() || !state().authenticated) return;
     setWorkspaceMenu(false);
     setError("");
+    setWorkspaceBusy(true);
     try {
       const config = await command<ConfigSummary | null>("choose_workspace");
-      if (config) setState((current) => ({ ...current, config }));
+      if (config) {
+        setState((current) => ({ ...current, config }));
+        setView("chat");
+        setSidebarOpen(false);
+      }
       await refreshState();
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setWorkspaceBusy(false);
     }
   };
   const applyWorkspace = async (path: string) => {
-    if (streaming() || busy() || !state().authenticated) return;
+    if (streaming() || busy() || workspaceBusy() || !state().authenticated) return false;
     setWorkspaceMenu(false);
+    if (workspaceKey(path) === workspaceKey(state().config?.workspace ?? "")) {
+      setView("chat");
+      setSidebarOpen(false);
+      return true;
+    }
     setError("");
+    setWorkspaceBusy(true);
     try {
       const config = await command<ConfigSummary>("configure", {
         groupId: state().config?.groupId,
@@ -270,10 +328,21 @@ export default function App() {
         workspace: path,
       });
       setState((current) => ({ ...current, config }));
+      setView("chat");
+      setSidebarOpen(false);
       await refreshState();
+      return true;
     } catch (err) {
       setError(errorMessage(err));
+      return false;
+    } finally {
+      setWorkspaceBusy(false);
     }
+  };
+  const openConversation = async (item: Conversation) => {
+    if (streaming() || busy() || workspaceBusy()) return;
+    if (!await applyWorkspace(item.workspace)) return;
+    if (activeConversationId() !== item.id) activateConversation(item);
   };
   const revealWorkspace = async () => {
     if (!desktop || !state().config) return;
@@ -361,6 +430,8 @@ export default function App() {
         config: null,
       }));
       setGroups([]);
+      lastConversation.clear();
+      setPrompt("");
       setView("chat");
       const fresh = newConversation();
       setConversations([fresh]);
@@ -372,11 +443,11 @@ export default function App() {
     }
   };
   const startNew = () => {
-    if (streaming()) return;
-    if (conversation().messages.length) {
-      const fresh = newConversation();
+    if (streaming() || workspaceBusy()) return;
+    if (conversation().messages.length || prompt().trim()) {
+      const fresh = newConversation(state().config?.workspace);
       setConversations((items) => [fresh, ...items]);
-      setActiveConversationId(fresh.id);
+      activateConversation(fresh);
     }
     setView("chat");
     setPrompt("");
@@ -401,10 +472,15 @@ export default function App() {
       !text ||
       streaming() ||
       busy() ||
+      workspaceBusy() ||
       !state().authenticated ||
       !state().config
     )
       return;
+    if (workspaceKey(conversation().workspace) !== workspaceKey(state().config!.workspace)) {
+      setError("工作区尚未切换完成，请稍后重试。");
+      return;
+    }
     unlisten?.();
     const requestId = crypto.randomUUID();
     const conversationId = conversation().id;
@@ -418,6 +494,7 @@ export default function App() {
     activeRequestId = requestId;
     patchConversation(conversationId, (item) => ({
       ...item,
+      draft: "",
       title: item.messages.length ? item.title : text.slice(0, 42),
       messages: [
         ...item.messages,
@@ -547,13 +624,13 @@ export default function App() {
         >
           <img src="/moyu.png" width="32" height="32" class="brand-mark" alt="" />
           <span>
-            Moyu<span class="brand-agent">Agent</span>
+            墨羽<span class="brand-agent">Agent</span>
           </span>
         </a>
         <button
           class="new-chat-button"
           onClick={startNew}
-          disabled={streaming()}
+          disabled={streaming() || workspaceBusy()}
         >
           <Plus size={17} />
           新任务
@@ -584,60 +661,62 @@ export default function App() {
           </button>
         </div>
         <div class="history-section">
-          <div class="nav-section-label">
-            最近任务
-            <span>
-              {conversations()
-                .filter((item) => item.messages.length)
-                .length.toString()
-                .padStart(2, "0")}
-            </span>
+          <div class="nav-section-label workspace-heading">
+            <span>工作区</span>
+            <button
+              class="icon-button"
+              title="添加工作区"
+              aria-label="添加工作区"
+              disabled={!state().authenticated || streaming() || busy() || workspaceBusy()}
+              onClick={() => void chooseWorkspace()}
+            >
+              <FolderPlus size={16} />
+            </button>
           </div>
           <Show
-            when={conversations().some((item) => item.messages.length)}
-            fallback={<div class="history-empty">暂无任务</div>}
+            when={workspaces().length}
+            fallback={<div class="history-empty">暂无工作区</div>}
           >
-            <For each={conversations().filter((item) => item.messages.length)}>
-              {(item) => (
-                <button
-                  classList={{
-                    "history-item": true,
-                    selected:
-                      item.id === activeConversationId() && view() === "chat",
-                  }}
-                  title={item.title}
-                  disabled={streaming() && item.id !== activeConversationId()}
-                  onClick={() => {
-                    setActiveConversationId(item.id);
-                    setView("chat");
-                    setSidebarOpen(false);
-                    setNearBottom(true);
-                  }}
-                >
-                  <MessageSquare size={14} />
-                  <span>{item.title}</span>
-                </button>
+            <For each={workspaces()}>
+              {(path) => (
+                <div class="workspace-project">
+                  <button
+                    classList={{
+                      "workspace-row": true,
+                      selected: workspaceKey(path) === workspaceKey(state().config?.workspace ?? ""),
+                    }}
+                    title={path}
+                    aria-current={workspaceKey(path) === workspaceKey(state().config?.workspace ?? "") ? "true" : undefined}
+                    disabled={streaming() || busy() || workspaceBusy()}
+                    onClick={() => void applyWorkspace(path)}
+                  >
+                    <Folder size={16} />
+                    <span class="workspace-name">{folderName(path) || path}</span>
+                    <span class="workspace-count">{workspaceConversations(path).length || ""}</span>
+                  </button>
+                  <div class="workspace-conversations">
+                    <For each={workspaceConversations(path)}>
+                      {(item) => (
+                        <button
+                          classList={{
+                            "history-item": true,
+                            selected: item.id === activeConversationId() && view() === "chat",
+                          }}
+                          title={item.title}
+                          disabled={streaming() || busy() || workspaceBusy()}
+                          onClick={() => void openConversation(item)}
+                        >
+                          <span>{item.title}</span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
               )}
             </For>
           </Show>
         </div>
         <div class="sidebar-bottom">
-          <button
-            type="button"
-            class="workspace-status"
-            title={state().config?.workspace || "选择工作区"}
-            disabled={!state().authenticated || streaming() || busy()}
-            onClick={() => void chooseWorkspace()}
-          >
-            <Folder size={16} />
-            <div>
-              <span>当前工作区</span>
-              <strong>
-                {folderName(state().config?.workspace) || "未配置"}
-              </strong>
-            </div>
-            <span classList={{ "status-dot": true, ready: !!state().config }} />
-          </button>
           <div class="account-row">
             <span class="avatar">
               {state().user?.email.charAt(0).toUpperCase() || "M"}
@@ -645,7 +724,7 @@ export default function App() {
             <div>
               <strong>{state().user?.email || "尚未登录"}</strong>
               <span>
-                {state().authenticated ? "Sub2API 账户" : "Moyu Agent"}
+                {state().authenticated ? "Sub2API 账户" : "墨羽Agent"}
               </span>
             </div>
             <Show when={state().authenticated}>
@@ -674,9 +753,6 @@ export default function App() {
               <PanelLeftOpen size={19} />
             </button>
             <div class="topbar-title">
-              <span class="eyebrow">
-                {view() === "settings" ? "PREFERENCES" : "WORKSPACE"}
-              </span>
               <strong>
                 {view() === "settings"
                   ? "设置"
@@ -687,16 +763,6 @@ export default function App() {
             </div>
           </div>
           <div class="topbar-actions">
-            <Show when={state().authenticated && view() === "chat"}>
-              <button
-                class="topbar-chip"
-                title="打开设置"
-                onClick={() => openSettings("model")}
-              >
-                <span classList={{ "status-dot": true, ready: !!state().config }} />
-                {state().config?.model || "尚未配置模型"}
-              </button>
-            </Show>
             <span
               classList={{
                 "connection-state": true,
@@ -713,7 +779,7 @@ export default function App() {
             <EndpointSelect
               endpoint={state().endpoint}
               endpoints={state().endpoints}
-              disabled={!desktop || streaming()}
+              disabled={!desktop || streaming() || workspaceBusy()}
               onChange={(index) => void switchEndpoint(index)}
             />
             <WindowControls />
@@ -767,7 +833,7 @@ export default function App() {
                       </div>
                       <span class="eyebrow">YOUR NEXT WORKSPACE</span>
                       <h1>
-                        {twoFactorToken() ? "两步验证" : "登录 Moyu Agent"}
+                        {twoFactorToken() ? "两步验证" : "登录墨羽Agent"}
                       </h1>
                       <p class="login-subtitle">
                         {twoFactorToken() ? email() : "Sub2API 账户"}
@@ -931,19 +997,13 @@ export default function App() {
                           <div class="empty-mark">
                             <Terminal size={33} strokeWidth={1.4} />
                           </div>
-                          <h2>今天，从哪里开始？</h2>
-                          <span>
-                            {state().config
-                              ? `${state().config?.model} · ${
-                                  folderName(state().config?.workspace) ||
-                                  "默认工作区"
-                                }`
-                              : "工作区尚未配置"}
-                          </span>
-                          <Show when={state().authenticated}>
+                          <h2>
+                            {state().config ? <>在 <span class="empty-workspace" title={state().config?.workspace}>{folderName(state().config?.workspace) || "工作区"}</span> 中开始构建</> : "今天，想构建什么？"}
+                          </h2>
+                          <Show when={state().authenticated && !state().config}>
                             <button
                               class="text-button"
-                              disabled={streaming() || busy()}
+                              disabled={streaming() || busy() || workspaceBusy()}
                               onClick={() => void chooseWorkspace()}
                             >
                               选择工作区
@@ -976,7 +1036,7 @@ export default function App() {
                                 <div class="message-meta">
                                   <strong>
                                     {message.role === "assistant"
-                                      ? "Moyu"
+                                      ? "墨羽"
                                       : "你"}
                                   </strong>
                                   <Show when={message.role === "assistant"}>
@@ -1088,11 +1148,11 @@ export default function App() {
                           preview()
                             ? "桌面客户端准备就绪后开始任务"
                             : state().config
-                              ? "给 Moyu 一个任务..."
+                              ? "给墨羽一个任务..."
                               : "请先配置工作区"
                         }
                         disabled={
-                          !state().authenticated || !state().config || busy()
+                          !state().authenticated || !state().config || busy() || workspaceBusy()
                         }
                         onInput={(event) =>
                           handleComposerInput(event.currentTarget)
@@ -1122,7 +1182,7 @@ export default function App() {
                               disabled={
                                 !state().authenticated ||
                                 streaming() ||
-                                busy()
+                                busy() || workspaceBusy()
                               }
                               onClick={() => void chooseWorkspace()}
                             >
@@ -1147,7 +1207,7 @@ export default function App() {
                                 disabled={
                                   !state().authenticated ||
                                   streaming() ||
-                                  busy()
+                                  busy() || workspaceBusy()
                                 }
                                 onClick={(event) => {
                                   event.stopPropagation();
@@ -1160,9 +1220,9 @@ export default function App() {
                             <Show when={workspaceMenu()}>
                               <div class="workspace-menu" role="menu">
                                 <For
-                                  each={(state().recentWorkspaces ?? []).filter(
+                                  each={workspaces().filter(
                                     (path) =>
-                                      path !== state().config?.workspace,
+                                      workspaceKey(path) !== workspaceKey(state().config?.workspace ?? ""),
                                   )}
                                 >
                                   {(path) => (
@@ -1190,7 +1250,7 @@ export default function App() {
                           </div>
                           <button
                             type="button"
-                            class="composer-chip"
+                            class="composer-chip model-chip"
                             title="模型"
                             onClick={() => openSettings("model")}
                           >
@@ -1215,7 +1275,7 @@ export default function App() {
                                 !prompt().trim() ||
                                 !state().authenticated ||
                                 !state().config ||
-                                busy()
+                                busy() || workspaceBusy()
                               }
                             >
                               <ArrowUp size={19} />
@@ -1242,7 +1302,7 @@ export default function App() {
                             ready: !!state().config,
                           }}
                         />
-                        {streaming()
+                        {workspaceBusy() ? "正在切换工作区" : streaming()
                           ? streamStatus() || "处理中"
                           : state().config
                             ? "准备就绪"
@@ -1258,8 +1318,8 @@ export default function App() {
             <Settings
               state={state()}
               groups={groups()}
-              busy={busy()}
-              streaming={streaming()}
+              busy={busy() || workspaceBusy()}
+              streaming={streaming() || workspaceBusy()}
               tab={settingsTab()}
               pages={settingsMixins()}
               onTab={setSettingsTab}

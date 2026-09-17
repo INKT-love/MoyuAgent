@@ -77,7 +77,7 @@ export function command<T>(
 ): Promise<T> {
   if (!desktop)
     return Promise.reject(
-      new Error("请在 Moyu Agent 桌面客户端中执行此操作。"),
+      new Error("请在墨羽Agent桌面客户端中执行此操作。"),
     );
   return invoke<T>(name, args);
 }

@@ -11,10 +11,20 @@ try {
   await page.addInitScript(() => {
     const callbacks = new Map(); let next = 1;
     const endpoints = [{ index: 0, name: "主线路", baseUrl: "https://inktandwkx.top" }, { index: 1, name: "备用线路(CF)", baseUrl: "https://inkaicf.flymiku.top" }];
-    const state = { endpoint: endpoints[0], endpoints, authenticated: false, user: null, config: null };
+    const groups = [{ id: 1, name: "Anthropic", platform: "anthropic" }, { id: 2, name: "GPT-Pro", platform: "openai" }];
+    const models = [
+      { id: "codex-auto-review", name: "Codex Auto Review" },
+      { id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
+      { id: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
+      ...Array.from({ length: 6 }, (_, index) => ({ id: `test-model-${index}`, name: `Test Model ${index}` })),
+    ];
+    const state = { endpoint: endpoints[0], endpoints, authenticated: false, user: null, config: { groupId: 2, groupName: "GPT-Pro", model: "gpt-5.6-sol", workspace: "D:\\workspace", configPath: "D:\\appdata\\opencode.json" } };
+    const testState = { configureRequests: [], modelRequests: 0 };
+    window.__MOYU_TEST__ = testState;
     let active;
     window.isTauri = true;
     window.__TAURI_INTERNALS__ = {
+      metadata: { currentWindow: { label: "main" } },
       transformCallback(callback) { const id = next++; callbacks.set(id, callback); return id; },
       unregisterCallback(id) { callbacks.delete(id); },
       async invoke(command, args = {}) {
@@ -22,10 +32,15 @@ try {
         if (command === "get_public_settings") return { loginAgreementRequired: true, loginAgreementUrl: "https://inktandwkx.top/login", registrationUrl: null };
         if (command === "switch_endpoint") { state.endpoint = endpoints[args.index]; return state.endpoint; }
         if (command === "login") { state.authenticated = true; state.user = { email: "qa@example.test" }; return { user: state.user, requiresTwoFactor: false, tempToken: null }; }
-        if (command === "get_groups") return [{ id: 1, name: "Anthropic", platform: "anthropic" }];
-        if (command === "get_group_models") return [{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" }];
-        if (command === "configure") { state.config = { groupId: 1, groupName: "Anthropic", model: "claude-sonnet-4-6", workspace: args.workspace || "D:\\workspace", configPath: "D:\\appdata\\opencode.json" }; return state.config; }
-        if (command === "choose_workspace") { state.config = { ...(state.config || { groupId: 1, groupName: "Anthropic", model: "claude-sonnet-4-6", configPath: "D:\\appdata\\opencode.json" }), workspace: "D:\\picked" }; return state.config; }
+        if (command === "get_groups") return structuredClone(groups);
+        if (command === "get_group_models") { testState.modelRequests++; await new Promise(resolve => setTimeout(resolve, 80)); return structuredClone(models); }
+        if (command === "configure") {
+          testState.configureRequests.push(structuredClone(args));
+          const groupId = args.groupId ?? state.config.groupId;
+          state.config = { groupId, groupName: groups.find(group => group.id === groupId).name, model: args.model ?? state.config.model, workspace: args.workspace || "D:\\workspace", configPath: "D:\\appdata\\opencode.json" };
+          return structuredClone(state.config);
+        }
+        if (command === "choose_workspace") { state.config = { ...state.config, workspace: "D:\\picked" }; return structuredClone(state.config); }
         if (command === "reveal_workspace") return;
         if (command === "list_plugins") return [{ id: "concise", name: "简洁模式", description: "缩短回复", version: "0.1.0", enabled: false, bundled: true, hasModule: false, hasInstructions: true, hasUi: false }, { id: "snake", name: "贪吃蛇", description: "主界面测试", version: "0.1.0", enabled: false, bundled: true, hasModule: false, hasInstructions: false, hasUi: true }];
         if (command === "list_plugin_uis") return [];
@@ -47,6 +62,8 @@ try {
           return;
         }
         if (command === "cancel_stream") { active?.end("cancelled"); return; }
+        if (command === "plugin:event|listen") return next++;
+        if (command === "plugin:event|unlisten") return;
         if (typeof command === "string" && command.startsWith("plugin:window|")) {
           if (command.endsWith("is_maximized")) return false;
           return;
@@ -81,11 +98,48 @@ try {
   await page.locator(".composer-chip").filter({ hasText: "picked" }).waitFor();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("tab", { name: "模型" }).waitFor();
+  const modelSelect = page.locator("#model");
+  const expectModel = async (expected, message) => {
+    await page.waitForFunction(() => {
+      const select = document.querySelector("#model");
+      return select && !select.disabled && select.options.length === 9;
+    });
+    assert.equal(await modelSelect.inputValue(), expected, message);
+    assert.equal(await page.locator("#group").inputValue(), "2", "The saved non-first group must remain selected");
+  };
+  await expectModel("gpt-5.6-sol", "The saved non-first model must be selected after asynchronous catalog loading");
+  assert.equal(await modelSelect.evaluate(node => node.tagName), "SELECT");
+  await modelSelect.selectOption("gpt-5.6-terra");
+  await page.getByRole("button", { name: "一键配置", exact: true }).click();
+  await page.getByText("配置已写入", { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__MOYU_TEST__.configureRequests.at(-1)), { groupId: 2, model: "gpt-5.6-terra", workspace: "D:\\picked" }, "Saving must send the selected model and preserve the group and workspace");
+  await expectModel("gpt-5.6-terra", "Saving must keep the selected non-first model visible");
+  await page.locator(".settings-summary").getByText("gpt-5.6-terra", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "对话", exact: true }).click();
+  await prompt.waitFor();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expectModel("gpt-5.6-terra", "Returning to settings must restore the saved non-first model");
   await page.getByRole("tab", { name: "测试页" }).click();
   assert.ok(await page.locator("iframe[title='测试页']").isVisible(), "ui.settings mixin must mount a settings page");
   await page.getByRole("tab", { name: "模型" }).click();
-  assert.equal(await page.locator("#model").evaluate((node) => node.tagName), "SELECT");
-  assert.equal(await page.locator("#model").inputValue(), "claude-sonnet-4-6");
+  await expectModel("gpt-5.6-terra", "Returning to the model tab must restore the saved non-first model");
+  const modelRequests = await page.evaluate(() => window.__MOYU_TEST__.modelRequests);
+  await page.getByRole("button", { name: "刷新用户分组", exact: true }).click();
+  await page.waitForFunction(previous => window.__MOYU_TEST__.modelRequests > previous, modelRequests);
+  await expectModel("gpt-5.6-terra", "Refreshing groups and models must keep the saved selections");
+  const modelFilter = page.getByPlaceholder("筛选模型名称或 ID");
+  await modelFilter.fill("Sol");
+  await page.waitForFunction(() => document.querySelector("#model").options.length === 2);
+  assert.equal(await modelSelect.inputValue(), "gpt-5.6-terra", "Filtering must preserve the selected model even when it does not match the query");
+  await modelSelect.selectOption("gpt-5.6-sol");
+  await page.waitForFunction(() => document.querySelector("#model").options.length === 1);
+  assert.equal(await modelSelect.inputValue(), "gpt-5.6-sol", "Selecting a filtered result must update the visible selection");
+  await modelFilter.fill("");
+  await expectModel("gpt-5.6-sol", "Clearing the model filter must preserve the selected non-first model");
+  await page.getByRole("button", { name: "一键配置", exact: true }).click();
+  await page.getByText("配置已写入", { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__MOYU_TEST__.configureRequests.at(-1)), { groupId: 2, model: "gpt-5.6-sol", workspace: "D:\\picked" }, "Saving a filtered selection must send the displayed model");
+  await expectModel("gpt-5.6-sol", "The filtered model selection must remain visible after saving");
   await page.getByRole("tab", { name: "插件" }).click();
   await page.getByText("简洁模式").waitFor();
   await page.getByRole("tab", { name: "线路" }).click();
@@ -107,5 +161,10 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `Overflow at width ${width}`);
   }
   assert.deepEqual(errors, []);
-  console.log("PASS: desktop/mobile layout; mock IPC login, configuration, endpoint switch, live chunks, completion and cancellation; no browser errors.");
+  console.log("PASS: desktop/mobile layout; mock IPC login, asynchronous saved model selection, save payload, settings navigation, catalog refresh, model filtering, endpoint switch, live chunks, completion and cancellation; no browser errors.");
+} catch (error) {
+  console.error("Browser errors:", errors);
+  const page = browser.contexts()[0]?.pages()[0];
+  if (page) console.error("Page text:", (await page.locator("body").innerText()).slice(0, 4000));
+  throw error;
 } finally { await browser.close(); }

@@ -28,6 +28,8 @@ export function ModelTab(props: {
   const [saving, setSaving] = createSignal(false);
   const [error, setError] = createSignal("");
   const [success, setSuccess] = createSignal(false);
+  let groupSelect: HTMLSelectElement | undefined;
+  let modelSelect: HTMLSelectElement | undefined;
 
   createEffect(() => {
     const config = props.state.config;
@@ -84,6 +86,20 @@ export function ModelTab(props: {
         item.name.toLowerCase().includes(query),
     );
   });
+
+  // Reapply the selection after options are rebuilt, even when the saved value
+  // is unchanged. Otherwise native selects can fall back to the first option.
+  createEffect(() => {
+    props.groups;
+    const selected = groupId();
+    if (groupSelect) groupSelect.value = String(selected);
+  });
+  createEffect(() => {
+    visibleModels();
+    const selected = model();
+    if (modelSelect) modelSelect.value = selected;
+  });
+
   const dirty = createMemo(() => {
     const config = props.state.config;
     if (!config) return Boolean(groupId() && model());
@@ -150,6 +166,7 @@ export function ModelTab(props: {
             <label for="group">用户分组</label>
             <div class="select-wrap">
               <select
+                ref={groupSelect}
                 id="group"
                 value={groupId()}
                 disabled={locked()}
@@ -189,6 +206,7 @@ export function ModelTab(props: {
             </Show>
             <div class="select-wrap">
               <select
+                ref={modelSelect}
                 id="model"
                 value={model()}
                 disabled={locked() || modelsLoading()}

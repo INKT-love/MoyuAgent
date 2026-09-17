@@ -12,7 +12,7 @@
   "app": {
     "windows": [{
       "label": "main",
-      "title": "Moyu Agent",
+      "title": "墨羽Agent",
       "width": 1200,
       "height": 820,
       "minWidth": 360,
