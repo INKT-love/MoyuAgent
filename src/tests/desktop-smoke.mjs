@@ -182,6 +182,10 @@ try {
             active?.();
             return;
           default:
+            if (typeof command === "string" && command.startsWith("plugin:window|")) {
+              if (command.endsWith("is_maximized")) return false;
+              return;
+            }
             throw new Error(`Unexpected IPC command: ${command}`);
         }
       },

@@ -131,7 +131,7 @@ button svg {
   flex: none;
   background: #f1f4f1;
   border-right: 1px solid var(--border);
-  padding: 22px 16px 0;
+  padding: 14px 16px 0;
   display: flex;
   flex-direction: column;
 }
@@ -350,7 +350,7 @@ button.workspace-status:hover:enabled {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 10px 28px;
+  padding: 10px 8px 10px 28px;
   flex: none;
 }
 .breadcrumb {
@@ -374,6 +374,29 @@ button.workspace-status:hover:enabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.window-controls {
+  display: flex;
+  align-self: stretch;
+  margin: -10px -8px -10px 8px;
+  flex: none;
+}
+.window-control {
+  width: 46px;
+  min-width: 46px;
+  height: auto;
+  display: grid;
+  place-items: center;
+  color: #5d7265;
+  border-radius: 0;
+}
+.window-control:hover {
+  background: #e8eee9;
+  color: #243d31;
+}
+.window-control.window-close:hover {
+  background: #e81123;
+  color: #fff;
 }
 .topbar-actions {
   display: flex;
@@ -1018,7 +1041,9 @@ button.workspace-status:hover:enabled {
 .settings-page {
   padding: 28px 32px 24px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   flex: 1;
+  min-height: 0;
 }
 .page-heading {
   max-width: 720px;
@@ -1347,7 +1372,7 @@ button.workspace-status:hover:enabled {
     font-size: 28px;
   }
   .topbar {
-    padding: 10px 42px;
+    padding: 10px 8px 10px 42px;
   }
 }
 @media (max-width: 1050px) {
@@ -1421,7 +1446,7 @@ button.workspace-status:hover:enabled {
   }
   .topbar {
     min-height: 54px;
-    padding: 8px 14px;
+    padding: 8px 0 8px 14px;
     gap: 8px;
   }
   .breadcrumb {
@@ -1548,7 +1573,7 @@ button.workspace-status:hover:enabled {
 }
 @media (max-width: 380px) {
   .topbar {
-    padding: 8px 12px;
+    padding: 8px 0 8px 12px;
   }
   .topbar-actions {
     gap: 7px;

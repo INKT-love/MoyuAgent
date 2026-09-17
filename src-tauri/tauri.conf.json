@@ -10,7 +10,16 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{"label": "main", "title": "Moyu Agent", "width": 1200, "height": 820, "minWidth": 360, "minHeight": 540}],
+    "windows": [{
+      "label": "main",
+      "title": "Moyu Agent",
+      "width": 1200,
+      "height": 820,
+      "minWidth": 360,
+      "minHeight": 540,
+      "decorations": false,
+      "shadow": true
+    }],
     "security": {
       "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'self' blob: data:"
     }

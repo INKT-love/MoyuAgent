@@ -47,6 +47,10 @@ try {
           return;
         }
         if (command === "cancel_stream") { active?.end("cancelled"); return; }
+        if (typeof command === "string" && command.startsWith("plugin:window|")) {
+          if (command.endsWith("is_maximized")) return false;
+          return;
+        }
         throw new Error(`Unimplemented test command: ${command}`);
       },
     };

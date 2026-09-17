@@ -3,7 +3,7 @@ import { Dynamic } from "solid-js/web";
 import { AppWindow, Globe2, KeyRound, Puzzle } from "lucide-solid";
 import type { AppState, ConfigSummary, Group } from "../lib/api";
 import { folderName } from "../lib/api";
-import type { UiInjection } from "../lib/mixin";
+import { withBridge, type UiInjection } from "../lib/mixin";
 import { EndpointSelect } from "./settings/EndpointSelect";
 import { EndpointTab } from "./settings/EndpointTab";
 import { ModelTab } from "./settings/ModelTab";
@@ -165,7 +165,7 @@ export default function Settings(props: Props) {
             >
               <iframe
                 title={page.name}
-                srcdoc={page.html}
+                srcdoc={withBridge(page.html)}
                 sandbox="allow-scripts"
               />
             </section>

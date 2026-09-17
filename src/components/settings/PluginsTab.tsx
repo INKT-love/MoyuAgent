@@ -54,10 +54,9 @@ export function PluginsTab(props: {
         </button>
       </div>
       <p class="settings-copy">
-        写插件只需含 plugin.json 的目录，不必改 Agent，也不必登记注入点。
-        界面用 CSS 选择器对着现有 class 插：select 写成 .composer-context、.sidebar-nav、.topbar-actions 等即可。
-        完整 HTML 文档不写 select 会浮在主窗口；select 写成 .settings-page 会变成设置里的一页。
-        只有拦发送等行为才写 target，例如 chat.send 的 HEAD / RETURN / WRAP。
+        写插件只需含 plugin.json 的目录。界面用 CSS select 插入。
+        后端放 backend.wasm，导出 before，对着任意 Tauri 命令名注入，不必在 Agent 里埋钩子。
+        启用「WASM探针」后，设置里会多一页，输入栏会出现标记。
       </p>
       <Show when={error()}>
         <div role="alert" class="notice error-notice">

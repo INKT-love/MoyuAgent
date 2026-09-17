@@ -38,6 +38,7 @@ import Settings, {
   pluginSettingsTab,
   type SettingsTab,
 } from "./components/Settings";
+import WindowControls from "./components/WindowControls";
 import {
   command,
   defaultModel,
@@ -57,6 +58,7 @@ import {
 } from "./lib/api";
 import {
   mixins,
+  withBridge,
   type PluginMixin,
   type UiInjection,
 } from "./lib/mixin";
@@ -190,6 +192,7 @@ export default function App() {
       await refreshState();
       if (state().authenticated)
         setGroups(supportedGroups(await command<Group[]>("get_groups")));
+      mixins.start();
       await refreshMixins();
       mixinObserver = new MutationObserver(() => {
         if (mixinFrame !== undefined) return;
@@ -209,6 +212,7 @@ export default function App() {
     disposed = true;
     mixinObserver?.disconnect();
     if (mixinFrame !== undefined) cancelAnimationFrame(mixinFrame);
+    mixins.stop();
     mixins.reset();
     setPassword("");
     setTotpCode("");
@@ -482,11 +486,7 @@ export default function App() {
   const send = async (event?: SubmitEvent, override?: string) => {
     event?.preventDefault();
     try {
-      await mixins.invoke(
-        "chat.send",
-        (...args: unknown[]) => sendMessage(args[0]),
-        [override ?? prompt()],
-      );
+      await sendMessage(override ?? prompt());
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -539,6 +539,7 @@ export default function App() {
         <a
           class="brand"
           href="#"
+          data-tauri-drag-region
           onClick={(event) => {
             event.preventDefault();
             setView("chat");
@@ -662,7 +663,7 @@ export default function App() {
         </div>
       </aside>
       <main class="main-pane">
-        <header class="topbar">
+        <header class="topbar" data-tauri-drag-region>
           <div class="breadcrumb">
             <button
               class="icon-button mobile-nav"
@@ -715,6 +716,7 @@ export default function App() {
               disabled={!desktop || streaming()}
               onChange={(index) => void switchEndpoint(index)}
             />
+            <WindowControls />
           </div>
         </header>
         <Show when={error()}>
@@ -1309,7 +1311,7 @@ export default function App() {
                   </header>
                   <iframe
                     title={plugin.name}
-                    srcdoc={plugin.html}
+                    srcdoc={withBridge(plugin.html)}
                     sandbox="allow-scripts"
                   />
                 </section>

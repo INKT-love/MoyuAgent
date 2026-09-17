@@ -6,6 +6,7 @@ use services::{
     auth::{self, AuthService, Group, GroupModel, LoginResult, User},
     config::{self, ConfigSummary, Preferences},
     harness::{self, PluginInfo, PluginMixin, PluginUi},
+    wasm_ipc,
     opencode::{Engine, EngineHealth, RunEnvironment, RunRequest},
     stream::StreamEvent,
 };
@@ -33,6 +34,7 @@ impl AppState {
             .get_or_try_init(|| async {
                 let preferences = config::load(app).await?;
                 harness::seed_bundled(app).await?;
+                wasm_ipc::reload(app, &preferences.enabled_plugins).await?;
                 let api = Arc::new(ApiClient::new(preferences.endpoint_index.min(1))?);
                 Ok(Services {
                     auth: AuthService::new(api.clone()),
@@ -462,6 +464,7 @@ async fn install_plugin(
             .await?;
         *services.engine.lock().await = None;
     }
+    wasm_ipc::reload(&app, &enabled).await?;
     harness::list_plugins(&app, &enabled).await
 }
 
@@ -495,6 +498,7 @@ async fn set_plugin_enabled(
             .await?;
         *services.engine.lock().await = None;
     }
+    wasm_ipc::reload(&app, &enabled_ids).await?;
     harness::list_plugins(&app, &enabled_ids).await
 }
 
@@ -522,6 +526,7 @@ async fn uninstall_plugin(
             .await?;
         *services.engine.lock().await = None;
     }
+    wasm_ipc::reload(&app, &enabled).await?;
     harness::list_plugins(&app, &enabled).await
 }
 
@@ -646,17 +651,15 @@ async fn get_engine_status(
     )
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-    tauri::Builder::default()
-        .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_secure_store::init())
-        .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![
+fn native_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
+    fn call<F>(handler: F, invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool
+    where
+        F: Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool,
+    {
+        handler(invoke)
+    }
+    call(
+        tauri::generate_handler![
             get_app_state,
             switch_endpoint,
             get_public_settings,
@@ -678,7 +681,22 @@ pub fn run() {
             ack_stream,
             cancel_stream,
             get_engine_status
-        ])
+        ],
+        invoke,
+    )
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_secure_store::init())
+        .manage(AppState::default())
+        .invoke_handler(|invoke| wasm_ipc::intercept(invoke, native_commands))
         .build(tauri::generate_context!())
         .expect("Failed to build Moyu Agent")
         .run(|app, event| {

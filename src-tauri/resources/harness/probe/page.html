@@ -12,9 +12,7 @@
         margin: 0;
         background: #fcfdfc;
       }
-      body {
-        padding: 18px 18px 20px;
-      }
+      body { padding: 18px 18px 20px; }
       .kicker {
         font-size: 10px;
         letter-spacing: 0.08em;
@@ -61,38 +59,34 @@
         cursor: pointer;
       }
       button:hover { background: #1e4d3f; }
-      .count {
-        margin-left: 10px;
-        font-size: 12px;
+      pre {
+        margin: 12px 0 0;
+        font-size: 11px;
+        white-space: pre-wrap;
         color: #5d7265;
       }
     </style>
   </head>
   <body>
-    <div class="kicker">MIXIN · UI.SETTINGS</div>
-    <h1>设置测试页</h1>
-    <p>这个页面由 lab 插件混入设置，用来确认宿主接入点可以长出完整页，而不只是浮层。</p>
+    <div class="kicker">WASM · BACKEND.WASM</div>
+    <h1>WASM 探针</h1>
+    <p>这个插件没有改 Agent 代码。点下面按钮会调用 get_engine_status；若 WASM 已注入，返回里会有 probe: wasm-ok。</p>
     <div class="row">
-      <span class="chip">接入点 ui.settings</span>
-      <span class="chip">at RETURN</span>
+      <span class="chip">backend.wasm</span>
+      <span class="chip">before</span>
+      <span class="chip">get_engine_status</span>
     </div>
-    <button type="button" id="ping">点一下</button>
-    <span class="count">计数 <strong id="n">0</strong></span>
-    <div class="row" style="margin-top:16px">
-      <button type="button" id="state">读状态</button>
-    </div>
-    <pre id="out" style="margin:12px 0 0;font-size:11px;white-space:pre-wrap;color:#5d7265"></pre>
+    <button type="button" id="probe">探测 WASM</button>
+    <pre id="out">尚未探测</pre>
     <script>
-      let n = 0;
-      document.getElementById("ping").addEventListener("click", () => {
-        n += 1;
-        document.getElementById("n").textContent = String(n);
-      });
-      document.getElementById("state").addEventListener("click", async () => {
+      document.getElementById("probe").addEventListener("click", async () => {
         const out = document.getElementById("out");
         try {
-          const state = await window.Moyu.invoke("get_app_state");
-          out.textContent = JSON.stringify(state, null, 2);
+          if (!window.Moyu || typeof window.Moyu.invoke !== "function") {
+            throw new Error("Moyu 桥未注入");
+          }
+          const result = await window.Moyu.invoke("get_engine_status");
+          out.textContent = JSON.stringify(result, null, 2);
         } catch (error) {
           out.textContent = String(error);
         }

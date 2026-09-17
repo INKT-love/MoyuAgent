@@ -116,16 +116,24 @@ pub fn instructions_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(config::app_directory(app)?.join("harness-instructions.md"))
 }
 
-pub fn bundled_plugins_root(app: &AppHandle) -> Option<PathBuf> {
+pub fn bundled_plugin_sources(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     for candidate in ["harness", "resources/harness"] {
         if let Ok(path) = app.path().resolve(candidate, BaseDirectory::Resource) {
-            if path.is_dir() {
-                return Some(path);
+            if path.is_dir() && !dirs.iter().any(|existing| existing == &path) {
+                dirs.push(path);
             }
         }
     }
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/harness");
-    source.is_dir().then_some(source)
+    if source.is_dir() && !dirs.iter().any(|existing| existing == &source) {
+        dirs.push(source);
+    }
+    dirs
+}
+
+pub fn bundled_plugins_root(app: &AppHandle) -> Option<PathBuf> {
+    bundled_plugin_sources(app).into_iter().next_back()
 }
 
 pub async fn seed_bundled(app: &AppHandle) -> Result<(), String> {
@@ -133,31 +141,30 @@ pub async fn seed_bundled(app: &AppHandle) -> Result<(), String> {
     tokio::fs::create_dir_all(&destination)
         .await
         .map_err(|error| error.to_string())?;
-    let Some(source) = bundled_plugins_root(app) else {
-        return Ok(());
-    };
-    let mut entries = tokio::fs::read_dir(&source)
-        .await
-        .map_err(|error| error.to_string())?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        if !entry
-            .file_type()
+    for source in bundled_plugin_sources(app) {
+        let mut entries = tokio::fs::read_dir(&source)
+            .await
+            .map_err(|error| error.to_string())?;
+        while let Some(entry) = entries
+            .next_entry()
             .await
             .map_err(|error| error.to_string())?
-            .is_dir()
         {
-            continue;
+            if !entry
+                .file_type()
+                .await
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
+                continue;
+            }
+            let name = entry.file_name();
+            let id = name.to_string_lossy();
+            if !valid_plugin_id(&id) {
+                continue;
+            }
+            copy_dir(&entry.path(), &destination.join(name)).await?;
         }
-        let name = entry.file_name();
-        let id = name.to_string_lossy();
-        if !valid_plugin_id(&id) {
-            continue;
-        }
-        copy_dir(&entry.path(), &destination.join(name)).await?;
     }
     Ok(())
 }
@@ -688,6 +695,24 @@ mod tests {
         assert_eq!(mixins.len(), 1);
         assert_eq!(mixins[0].select.as_deref(), Some(".composer-context"));
         assert_eq!(mixins[0].html.as_deref(), Some("<span>ok</span>"));
+
+        tokio::fs::write(directory.path().join("bind.js"), "(el) => el")
+            .await
+            .unwrap();
+        let script_only = resolve_mixins(
+            directory.path(),
+            &manifest,
+            &json!({
+                "mixins": [{
+                    "select": ".send-button",
+                    "script": "bind.js"
+                }]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(script_only[0].select.as_deref(), Some(".send-button"));
+        assert_eq!(script_only[0].script.as_deref(), Some("(el) => el"));
 
         let fallback = resolve_mixins(directory.path(), &manifest, &json!({}))
             .await
