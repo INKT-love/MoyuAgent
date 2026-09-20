@@ -36,6 +36,8 @@ export interface ConfigSummary {
   model: string;
   workspace: string;
   configPath: string;
+  reasoningEffort?: string;
+  permissionMode?: string;
 }
 export interface AppState {
   endpoint: Endpoint;
@@ -44,6 +46,14 @@ export interface AppState {
   user: { email: string } | null;
   config: ConfigSummary | null;
   recentWorkspaces?: string[];
+  pinnedWorkspaces?: string[];
+  workspaceLabels?: Record<string, string>;
+}
+export interface WorkspaceActionResult {
+  recentWorkspaces: string[];
+  pinnedWorkspaces: string[];
+  workspaceLabels: Record<string, string>;
+  switchTo?: string | null;
 }
 export interface PublicSettings {
   loginAgreementRequired: boolean;
@@ -56,9 +66,30 @@ export interface LoginResult {
   requiresTwoFactor: boolean;
   tempToken: string | null;
 }
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  state?: "streaming" | "completed" | "failed" | "cancelled";
+  error?: string;
+}
+export interface ChatConversation {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  sessionId?: string;
+  workspace: string;
+  draft: string;
+  pinned?: boolean;
+  archived?: boolean;
+}
+export interface ConversationHistory {
+  activeId: string;
+  conversations: ChatConversation[];
+}
 
 export const ENDPOINTS: Endpoint[] = [
-  { index: 0, name: "主线路", baseUrl: "https://inktandwkx.top" },
+  { index: 0, name: "主线路", baseUrl: "https://api.inktandwkx.top" },
   { index: 1, name: "备用线路(CF)", baseUrl: "https://inkaicf.flymiku.top" },
 ];
 
@@ -77,7 +108,7 @@ export function command<T>(
 ): Promise<T> {
   if (!desktop)
     return Promise.reject(
-      new Error("请在墨羽Agent桌面客户端中执行此操作。"),
+      new Error("请在墨羽AGENT桌面客户端中执行此操作。"),
     );
   return invoke<T>(name, args);
 }
@@ -91,11 +122,15 @@ export function errorMessage(error: unknown): string {
 }
 
 export function defaultModel(group?: Group): string {
-  switch (group?.platform?.toLowerCase()) {
+  switch (group?.platform?.toLowerCase() ?? "") {
     case "openai":
       return "gpt-5.2";
-    default:
+    case "anthropic":
+    case "claude":
+    case "":
       return "claude-sonnet-4-6";
+    default:
+      return "";
   }
 }
 
@@ -109,10 +144,3 @@ export function pickModel(models: GroupModel[], preferred?: string): string {
   return models[0]?.id ?? preferred ?? "";
 }
 
-export function supportedGroups(groups: Group[]): Group[] {
-  return groups.filter(
-    (group) =>
-      !group.platform ||
-      ["anthropic", "claude", "openai"].includes(group.platform.toLowerCase()),
-  );
-}

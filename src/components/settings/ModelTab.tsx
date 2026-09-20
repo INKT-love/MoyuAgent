@@ -30,34 +30,39 @@ export function ModelTab(props: {
   const [success, setSuccess] = createSignal(false);
   let groupSelect: HTMLSelectElement | undefined;
   let modelSelect: HTMLSelectElement | undefined;
+  let forceModelsRefresh = false;
+  const authenticated = createMemo(() => props.state.authenticated);
+  const savedGroupId = createMemo(() => props.state.config?.groupId ?? 0);
+  const savedModel = createMemo(() => props.state.config?.model ?? "");
 
   createEffect(() => {
-    const config = props.state.config;
-    setGroupId(config?.groupId ?? props.groups[0]?.id ?? 0);
-    setModel(config?.model ?? "");
+    setGroupId(savedGroupId() || props.groups[0]?.id || 0);
+    setModel(savedModel());
   });
 
   createEffect(() => {
     const id = groupId();
     modelsTick();
-    if (!id || !props.state.authenticated) {
+    if (!id || !authenticated()) {
       setModels([]);
       setModelsLoading(false);
       return;
     }
     let cancelled = false;
+    const refresh = forceModelsRefresh;
+    forceModelsRefresh = false;
     setModelsLoading(true);
-    void command<GroupModel[]>("get_group_models", { groupId: id })
+    void command<GroupModel[]>("get_group_models", {
+      groupId: id,
+      ...(refresh ? { refresh: true } : {}),
+    })
       .then((list) => {
         if (cancelled) return;
         setModels(list);
         setModel((current) =>
           pickModel(
             list,
-            current ||
-              (props.state.config?.groupId === id
-                ? props.state.config.model
-                : undefined),
+            current || (savedGroupId() === id ? savedModel() : undefined),
           ),
         );
       })
@@ -105,8 +110,7 @@ export function ModelTab(props: {
     if (!config) return Boolean(groupId() && model());
     return config.groupId !== groupId() || config.model !== model();
   });
-  const locked = () =>
-    !props.state.authenticated || saving() || props.streaming;
+  const locked = () => !authenticated() || saving() || props.streaming;
 
   const save = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -144,26 +148,27 @@ export function ModelTab(props: {
         <div class="section-heading">
           <KeyRound size={18} />
           <h2>模型配置</h2>
-          <button
-            type="button"
-            class="text-button section-action"
-            title="刷新用户分组"
-            aria-label="刷新用户分组"
-            disabled={!props.state.authenticated || props.busy || saving()}
-            onClick={() => {
-              void props.onRefreshGroups().then(() =>
-                setModelsTick((tick) => tick + 1),
-              );
-            }}
-          >
-            <RefreshCw size={14} class={props.busy ? "spin" : ""} />
-            刷新
-          </button>
         </div>
-        <p class="settings-copy">只写入分组和模型，工作区保持不变。</p>
+        <p class="settings-copy">
+          分组和模型会在首次加载后保存在本地，可点刷新从 Sub2API 更新。只写入当前选择，工作区保持不变。
+        </p>
         <div class="setting-grid">
           <div class="setting-field">
-            <label for="group">用户分组</label>
+            <div class="setting-label-row">
+              <label for="group">用户分组</label>
+              <button
+                type="button"
+                class="field-refresh"
+                title="刷新用户分组"
+                aria-label="刷新用户分组"
+                disabled={!authenticated() || props.busy || saving()}
+                onClick={() => {
+                  void props.onRefreshGroups();
+                }}
+              >
+                <RefreshCw size={13} class={props.busy ? "spin" : ""} />
+              </button>
+            </div>
             <div class="select-wrap">
               <select
                 ref={groupSelect}
@@ -193,7 +198,28 @@ export function ModelTab(props: {
             </div>
           </div>
           <div class="setting-field">
-            <label for="model">模型</label>
+            <div class="setting-label-row">
+              <label for="model">模型</label>
+              <button
+                type="button"
+                class="field-refresh"
+                title="刷新模型列表"
+                aria-label="刷新模型列表"
+                disabled={
+                  locked() || modelsLoading() || !groupId() || props.busy
+                }
+                onClick={() => {
+                  forceModelsRefresh = true;
+                  setError("");
+                  setModelsTick((tick) => tick + 1);
+                }}
+              >
+                <RefreshCw
+                  size={13}
+                  class={modelsLoading() ? "spin" : ""}
+                />
+              </button>
+            </div>
             <Show when={models().length > 8}>
               <input
                 class="model-filter"
