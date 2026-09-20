@@ -1154,6 +1154,7 @@ struct SseInterpreter {
     part_messages: HashMap<String, String>,
     user_messages: HashSet<String>,
     assistant_messages: HashSet<String>,
+    ignored_parts: HashSet<String>,
     saw_working: bool,
 }
 
@@ -1167,6 +1168,7 @@ impl SseInterpreter {
             part_messages: HashMap::new(),
             user_messages: HashSet::new(),
             assistant_messages: HashSet::new(),
+            ignored_parts: HashSet::new(),
             saw_working: false,
         }
     }
@@ -1196,10 +1198,20 @@ impl SseInterpreter {
             || event_message_id(props).is_some_and(|id| self.user_messages.contains(id))
     }
 
+    fn ignore_part(&mut self, id: &str) {
+        self.ignored_parts.insert(id.to_owned());
+        self.text_parts.remove(id);
+        self.pending_text.remove(id);
+    }
+
     fn take_pending(&mut self) -> Vec<String> {
         let mut texts = Vec::new();
         for (id, text) in self.pending_text.drain() {
-            if self.streamed_parts.contains(&id) || text.is_empty() {
+            if self.streamed_parts.contains(&id)
+                || self.ignored_parts.contains(&id)
+                || !self.text_parts.contains(&id)
+                || text.is_empty()
+            {
                 continue;
             }
             if self
@@ -1239,13 +1251,14 @@ impl SseInterpreter {
                 if id.len() > 128 {
                     return EventOutcome::Failed(oversized_output());
                 }
-                if self.is_user_part(props) {
+                if self.is_user_part(props) || self.ignored_parts.contains(id) {
                     return EventOutcome::Ignore;
                 }
                 if let Some(message_id) = event_message_id(props) {
                     self.part_messages.insert(id.to_owned(), message_id.to_owned());
                 }
-                if !self.text_parts.is_empty() && !self.text_parts.contains(id) {
+                // Reasoning parts also stream field=text; only emit confirmed reply text.
+                if !self.text_parts.contains(id) {
                     return EventOutcome::Ignore;
                 }
                 let Some(delta) = props.get("delta").and_then(Value::as_str) else {
@@ -1264,9 +1277,6 @@ impl SseInterpreter {
                 let Some(part) = props.get("part") else {
                     return EventOutcome::Ignore;
                 };
-                if part.get("type").and_then(Value::as_str) != Some("text") {
-                    return EventOutcome::Ignore;
-                }
                 let Some(id) = part.get("id").and_then(Value::as_str) else {
                     return EventOutcome::Ignore;
                 };
@@ -1276,9 +1286,11 @@ impl SseInterpreter {
                 if let Some(message_id) = event_message_id(props) {
                     self.part_messages.insert(id.to_owned(), message_id.to_owned());
                 }
-                if self.is_user_part(props) {
+                if self.is_user_part(props) || !is_visible_text_part(part) {
+                    self.ignore_part(id);
                     return EventOutcome::Ignore;
                 }
+                self.ignored_parts.remove(id);
                 self.text_parts.insert(id.to_owned());
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     if !self.streamed_parts.contains(id) {
@@ -1336,6 +1348,11 @@ fn event_message_role(properties: &Value) -> Option<&str> {
         .or_else(|| properties.pointer("/message/role").and_then(Value::as_str))
         .or_else(|| properties.pointer("/part/role").and_then(Value::as_str))
         .or_else(|| properties.get("role").and_then(Value::as_str))
+}
+
+fn is_visible_text_part(part: &Value) -> bool {
+    part.get("type").and_then(Value::as_str) == Some("text")
+        && part.get("ignored").and_then(Value::as_bool) != Some(true)
 }
 
 async fn send_chunks(
@@ -2249,6 +2266,136 @@ mod tests {
             "type": "message.updated",
             "properties": {
                 "info": { "id": "msg_asst", "sessionID": "ses_1", "role": "assistant" }
+            }
+        }));
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_asst",
+                    "type": "text",
+                    "text": "Hello!",
+                    "messageID": "msg_asst",
+                    "sessionID": "ses_1"
+                }
+            }
+        }));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            })),
+            EventOutcome::Completed
+        ));
+        assert_eq!(interpreter.take_pending(), ["Hello!"]);
+    }
+
+    #[test]
+    fn sse_interpreter_does_not_stream_reasoning_as_reply() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        interpreter.apply(&json!({
+            "type": "message.updated",
+            "properties": {
+                "info": { "id": "msg_asst", "sessionID": "ses_1", "role": "assistant" }
+            }
+        }));
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_think",
+                    "type": "reasoning",
+                    "text": "",
+                    "messageID": "msg_asst",
+                    "sessionID": "ses_1"
+                }
+            }
+        }));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "messageID": "msg_asst",
+                    "partID": "prt_think",
+                    "field": "text",
+                    "delta": "Let me think..."
+                }
+            })),
+            EventOutcome::Ignore
+        ));
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_asst",
+                    "type": "text",
+                    "text": "",
+                    "messageID": "msg_asst",
+                    "sessionID": "ses_1"
+                }
+            }
+        }));
+        match interpreter.apply(&json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses_1",
+                "messageID": "msg_asst",
+                "partID": "prt_asst",
+                "field": "text",
+                "delta": "Hello!"
+            }
+        })) {
+            EventOutcome::Chunk(text) => assert_eq!(text, "Hello!"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            })),
+            EventOutcome::Completed
+        ));
+        assert!(interpreter.take_pending().is_empty());
+    }
+
+    #[test]
+    fn sse_interpreter_does_not_flush_reasoning_or_ignored_text() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        interpreter.apply(&json!({
+            "type": "message.updated",
+            "properties": {
+                "info": { "id": "msg_asst", "sessionID": "ses_1", "role": "assistant" }
+            }
+        }));
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_think",
+                    "type": "reasoning",
+                    "text": "Let me think...",
+                    "messageID": "msg_asst",
+                    "sessionID": "ses_1"
+                }
+            }
+        }));
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_hidden",
+                    "type": "text",
+                    "text": "internal",
+                    "ignored": true,
+                    "messageID": "msg_asst",
+                    "sessionID": "ses_1"
+                }
             }
         }));
         interpreter.apply(&json!({

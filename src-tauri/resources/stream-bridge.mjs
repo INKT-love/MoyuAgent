@@ -22,7 +22,7 @@ export default async function MoyuStreamBridge() {
       }
       if (event.type === "message.part.updated") {
         const part = properties.part;
-        if (part.type === "text" && part.sessionID === activeSession && !userMessages.has(part.messageID)) {
+        if (part.type === "text" && part.ignored !== true && part.sessionID === activeSession && !userMessages.has(part.messageID)) {
           textParts.add(part.id);
         }
       }
