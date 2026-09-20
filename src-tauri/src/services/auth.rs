@@ -26,7 +26,7 @@ pub struct Group {
     pub platform: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupModel {
     pub id: String,
@@ -215,17 +215,7 @@ impl AuthService {
         let payload = self
             .authorized(Method::GET, "/api/v1/groups/available", None, None)
             .await?;
-        let values = payload
-            .as_array()
-            .ok_or_else(|| "The API returned an invalid group list".to_owned())?;
-        values
-            .iter()
-            .filter(|value| value.get("status").and_then(Value::as_str) != Some("inactive"))
-            .map(|value| {
-                serde_json::from_value(value.clone())
-                    .map_err(|_| "The API returned an invalid group".to_owned())
-            })
-            .collect()
+        parse_groups(&payload)
     }
 
     pub async fn ensure_api_key(&self, group_id: i64, user_id: i64) -> Result<String, String> {
@@ -342,6 +332,53 @@ impl AuthService {
 
 pub fn api_key_secret_name(user_id: i64, group_id: i64) -> String {
     format!("api-key-{user_id}-{group_id}")
+}
+
+fn parse_groups(payload: &Value) -> Result<Vec<Group>, String> {
+    let values = payload
+        .as_array()
+        .or_else(|| payload.get("items").and_then(Value::as_array))
+        .or_else(|| payload.get("groups").and_then(Value::as_array))
+        .ok_or_else(|| "The API returned an invalid group list".to_owned())?;
+    Ok(values.iter().filter_map(parse_group).collect())
+}
+
+fn parse_group(value: &Value) -> Option<Group> {
+    if group_is_inactive(value) {
+        return None;
+    }
+    let id = value.get("id").and_then(|id| {
+        id.as_i64()
+            .or_else(|| id.as_u64().and_then(|id| i64::try_from(id).ok()))
+            .or_else(|| id.as_str().and_then(|id| id.parse().ok()))
+    })?;
+    if id <= 0 {
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    let platform = value
+        .get("platform")
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    Some(Group { id, name, platform })
+}
+
+fn group_is_inactive(value: &Value) -> bool {
+    match value.get("status") {
+        Some(Value::String(status)) => {
+            status.eq_ignore_ascii_case("inactive") || status.eq_ignore_ascii_case("disabled")
+        }
+        Some(Value::Number(status)) => status.as_i64() == Some(0),
+        _ => false,
+    }
 }
 
 fn nonempty_string(value: &Value, field: &str) -> Result<String, String> {
@@ -506,6 +543,30 @@ mod tests {
                 id: "claude-sonnet-4-6".into(),
                 name: "Claude Sonnet 4.6".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn parse_groups_keeps_every_active_sub2api_platform() {
+        let groups = parse_groups(&json!([
+            { "id": 37, "name": "限时福利", "platform": "openai", "status": "active" },
+            { "id": "8", "name": "Gemini", "platform": "gemini", "status": "active" },
+            { "id": 9, "name": "Kimi", "type": "kimi", "status": "active" },
+            { "id": 10, "name": "Old", "platform": "openai", "status": "inactive" },
+            { "id": 0, "name": "Invalid", "platform": "openai", "status": "active" },
+            { "name": "Missing id", "platform": "openai", "status": "active" }
+        ]))
+        .unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.id, group.name.as_str(), group.platform.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (37, "限时福利", "openai"),
+                (8, "Gemini", "gemini"),
+                (9, "Kimi", "kimi")
+            ]
         );
     }
 

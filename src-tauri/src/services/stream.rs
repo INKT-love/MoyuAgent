@@ -51,7 +51,13 @@ impl StreamPayload {
             message: message.into(),
             retryable: matches!(
                 code,
-                "sidecar_missing" | "spawn_failed" | "preflight_failed"
+                "sidecar_missing"
+                    | "spawn_failed"
+                    | "preflight_failed"
+                    | "opencode_error"
+                    | "opencode_http"
+                    | "process_exit"
+                    | "invalid_output"
             ),
         }
     }

@@ -215,8 +215,7 @@ pub async fn list_plugins(app: &AppHandle, enabled: &[String]) -> Result<Vec<Plu
                 .is_some_and(|root| root.join(&id).join("plugin.json").exists()),
             has_module: loaded.module.is_some(),
             has_instructions: loaded.instructions.is_some(),
-            has_ui: loaded.ui.is_some()
-                || loaded.mixins.iter().any(|mixin| mixin.html.is_some()),
+            has_ui: loaded.ui.is_some() || loaded.mixins.iter().any(|mixin| mixin.html.is_some()),
             id,
             name: loaded.manifest.name,
             description: loaded.manifest.description,
@@ -402,7 +401,10 @@ pub async fn list_plugin_mixins(
     enabled: &[String],
 ) -> Result<Vec<PluginMixin>, String> {
     let plugins = load_enabled(app, enabled).await?;
-    Ok(plugins.into_iter().flat_map(|plugin| plugin.mixins).collect())
+    Ok(plugins
+        .into_iter()
+        .flat_map(|plugin| plugin.mixins)
+        .collect())
 }
 
 const MAX_UI_BYTES: usize = 256 * 1024;
@@ -656,10 +658,9 @@ mod tests {
 
     #[test]
     fn bundled_harness_ships_lab_settings_mixin() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources/harness/lab/plugin.json");
-        let value: Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/harness/lab/plugin.json");
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(value["id"], "lab");
         assert_eq!(value["mixins"][0]["select"], ".settings-page");
     }

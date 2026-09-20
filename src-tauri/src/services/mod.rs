@@ -1,7 +1,9 @@
 pub mod api_client;
 pub mod auth;
 pub mod config;
+pub mod engines;
 pub mod harness;
-pub mod wasm_ipc;
+pub mod history;
 pub mod opencode;
 pub mod stream;
+pub mod wasm_ipc;

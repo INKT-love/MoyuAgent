@@ -5,8 +5,9 @@ use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde_json::Value;
 
-const BASE_URLS: [&str; 2] = ["https://inktandwkx.top", "https://inkaicf.flymiku.top"];
+const BASE_URLS: [&str; 2] = ["https://api.inktandwkx.top", "https://inkaicf.flymiku.top"];
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 pub const UNAUTHORIZED: &str = "Authentication expired or credentials were rejected (HTTP 401)";
 
 #[derive(Clone, Debug, Serialize)]
@@ -82,6 +83,32 @@ impl ApiClient {
             }
         }
         Ok(self.endpoint())
+    }
+
+    async fn endpoint_reachable(&self, index: usize) -> bool {
+        let url = format!("{}/v1/models", self.base_urls[index]);
+        matches!(
+            tokio::time::timeout(PROBE_TIMEOUT, self.client.get(url).send()).await,
+            Ok(Ok(_))
+        )
+    }
+
+    // REST already retries the other host; OpenCode cannot, so pin the sidecar to a reachable line.
+    pub async fn reachable_endpoint(&self) -> Result<Endpoint, String> {
+        let first = self.current.load(Ordering::Acquire);
+        for attempt in 0..self.base_urls.len() {
+            let index = (first + attempt) % self.base_urls.len();
+            if self.endpoint_reachable(index).await {
+                if index != first {
+                    self.current.store(index, Ordering::Release);
+                }
+                return Ok(self.endpoint());
+            }
+        }
+        Err(
+            "Cannot reach the API endpoints; check the network connection or switch to the backup line"
+                .to_owned(),
+        )
     }
 
     pub async fn request_json(
@@ -331,5 +358,51 @@ mod tests {
         assert!(error.contains("HTTP 503"));
         first.await.unwrap();
         second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reachable_endpoint_failsover_when_primary_transport_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable =
+            Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        drop(listener);
+        let (backup, task) = server(401, r#"{"error":"invalid_api_key"}"#).await;
+        let api = ApiClient::with_urls(0, [unavailable, backup]).unwrap();
+        let endpoint = api.reachable_endpoint().await.unwrap();
+        assert_eq!(endpoint.index, 1);
+        assert_eq!(api.endpoint().index, 1);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reachable_endpoint_keeps_a_selected_line_that_answers_http() {
+        let (primary, task) = server(503, "{}").await;
+        let api = ApiClient::with_urls(0, [primary, "http://127.0.0.1:1"]).unwrap();
+        let endpoint = api.reachable_endpoint().await.unwrap();
+        assert_eq!(endpoint.index, 0);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_primary_api_host_completes_tls() {
+        let api = ApiClient::new(0).unwrap();
+        assert!(
+            api.endpoint_reachable(0).await,
+            "https://api.inktandwkx.top must complete TLS"
+        );
+        assert_eq!(api.reachable_endpoint().await.unwrap().index, 0);
+    }
+
+    #[tokio::test]
+    async fn reachable_endpoint_errors_when_both_lines_are_down() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable =
+            Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        drop(listener);
+        let api = ApiClient::with_urls(0, [unavailable, "http://127.0.0.1:1"]).unwrap();
+        let error = api.reachable_endpoint().await.unwrap_err();
+        assert!(error.contains("backup line"));
+        assert_eq!(api.endpoint().index, 0);
     }
 }

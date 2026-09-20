@@ -4,12 +4,15 @@ use serde::Serialize;
 use services::{
     api_client::{self, ApiClient, Endpoint},
     auth::{self, AuthService, Group, GroupModel, LoginResult, User},
-    config::{self, ConfigSummary, Preferences},
+    config::{self, ConfigSummary, Preferences, WorkspaceActionResult},
     harness::{self, PluginInfo, PluginMixin, PluginUi},
-    wasm_ipc,
+    engines::EnginePool,
+    history::{self, HistorySnapshot},
     opencode::{Engine, EngineHealth, RunEnvironment, RunRequest},
     stream::StreamEvent,
+    wasm_ipc,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 use tokio::sync::{Mutex, OnceCell};
@@ -24,7 +27,7 @@ struct Services {
     auth: AuthService,
     preferences: Mutex<Preferences>,
     user: Mutex<Option<User>>,
-    engine: Mutex<Option<Arc<Engine>>>,
+    engines: EnginePool,
     mutation: Mutex<()>,
 }
 
@@ -41,7 +44,7 @@ impl AppState {
                     api,
                     preferences: Mutex::new(preferences),
                     user: Mutex::new(None),
-                    engine: Mutex::new(None),
+                    engines: EnginePool::new(),
                     mutation: Mutex::new(()),
                 })
             })
@@ -58,6 +61,8 @@ struct Snapshot {
     user: Option<User>,
     config: Option<ConfigSummary>,
     recent_workspaces: Vec<String>,
+    pinned_workspaces: Vec<String>,
+    workspace_labels: HashMap<String, String>,
 }
 
 impl Services {
@@ -75,14 +80,14 @@ impl Services {
             user,
             config,
             recent_workspaces: prefs.recent_workspaces.clone(),
+            pinned_workspaces: prefs.pinned_workspaces.clone(),
+            workspace_labels: prefs.workspace_labels.clone(),
         })
     }
 
     async fn ensure_idle(&self) -> Result<(), String> {
-        if let Some(engine) = self.engine.lock().await.as_ref() {
-            if engine.health().await.active_requests > 0 {
-                return Err("Stop the current response before changing configuration".into());
-            }
+        if self.engines.active_requests().await > 0 {
+            return Err("Stop the current response before changing configuration".into());
         }
         Ok(())
     }
@@ -99,15 +104,134 @@ impl Services {
     }
 
     async fn engine(&self, app: &AppHandle, config: &ConfigSummary) -> Result<Arc<Engine>, String> {
-        let mut engine = self.engine.lock().await;
-        if engine.is_none() {
-            *engine = Some(Arc::new(Engine::new(
+        self.engines
+            .get_or_create(
                 config::sidecar_path(app)?,
-                config.working_directory.clone().into(),
-            )));
-        }
-        Ok(engine.as_ref().unwrap().clone())
+                std::path::PathBuf::from(&config.working_directory),
+            )
+            .await
     }
+
+    async fn drop_engine(&self) {
+        self.engines.shutdown_all().await;
+    }
+
+    async fn boot_engine(&self, app: &AppHandle) {
+        let Some(user) = self.user.lock().await.clone() else {
+            return;
+        };
+        let Some(summary) = self
+            .preferences
+            .lock()
+            .await
+            .config
+            .clone()
+            .filter(|config| config.user_id == user.id)
+        else {
+            return;
+        };
+        let Ok(Some(key)) = tauri_plugin_secure_store::get_secret(&auth::api_key_secret_name(
+            user.id,
+            summary.group_id,
+        ))
+        .await
+        else {
+            return;
+        };
+        let Ok(engine) = self.engine(app, &summary).await else {
+            return;
+        };
+        if engine.health().await.active_requests > 0 {
+            return;
+        }
+        if let Err(error) = engine
+            .ensure_server(&RunEnvironment {
+                config_path: summary.config_path.into(),
+                api_key: key,
+                model: Some(format!("sub2api/{}", summary.model)),
+                reasoning_effort: Some(config::normalize_reasoning_effort(Some(
+                    &summary.reasoning_effort,
+                ))),
+            })
+            .await
+        {
+            tracing::warn!(%error, "OpenCode server did not start with the application");
+        }
+    }
+
+    async fn require_user(&self, action: &str) -> Result<User, String> {
+        if let Some(user) = self.user.lock().await.clone() {
+            return Ok(user);
+        }
+        let user = self
+            .auth
+            .current_user()
+            .await?
+            .ok_or_else(|| format!("Sign in before {action}"))?;
+        *self.user.lock().await = Some(user.clone());
+        Ok(user)
+    }
+
+    async fn catalog_groups(&self, app: &AppHandle, refresh: bool) -> Result<Vec<Group>, String> {
+        let user = self.require_user("listing groups").await?;
+        if !refresh {
+            let cached = self
+                .preferences
+                .lock()
+                .await
+                .groups_for(user.id)
+                .map(|groups| groups.to_vec());
+            if let Some(groups) = cached {
+                return Ok(groups);
+            }
+        }
+        let groups = self.auth.groups().await?;
+        let mut prefs = self.preferences.lock().await;
+        prefs.set_groups(user.id, groups.clone());
+        config::save(app, prefs.clone()).await?;
+        Ok(groups)
+    }
+
+    async fn catalog_models(
+        &self,
+        app: &AppHandle,
+        group_id: i64,
+        refresh: bool,
+    ) -> Result<Vec<GroupModel>, String> {
+        let user = self.require_user("listing models").await?;
+        if group_id <= 0 {
+            return Err("The selected group is not available for this account".into());
+        }
+        if !refresh {
+            let cached = self
+                .preferences
+                .lock()
+                .await
+                .models_for(user.id, group_id)
+                .map(|models| models.to_vec());
+            if let Some(models) = cached {
+                return Ok(models);
+            }
+        }
+        let groups = self.catalog_groups(app, false).await?;
+        if !groups.iter().any(|group| group.id == group_id) {
+            return Err("The selected group is not available for this account".into());
+        }
+        let models = self.auth.group_models(group_id, user.id).await?;
+        let mut prefs = self.preferences.lock().await;
+        prefs.set_models(user.id, group_id, models.clone());
+        config::save(app, prefs.clone()).await?;
+        Ok(models)
+    }
+}
+
+fn spawn_boot(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Ok(services) = state.services(&app).await {
+            services.boot_engine(&app).await;
+        }
+    });
 }
 
 #[tauri::command]
@@ -126,7 +250,11 @@ async fn get_app_state(app: AppHandle, state: State<'_, AppState>) -> Result<Sna
         };
         *services.user.lock().await = user;
     }
-    services.snapshot().await
+    let snapshot = services.snapshot().await?;
+    if snapshot.authenticated && snapshot.config.is_some() {
+        spawn_boot(app.clone());
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -137,7 +265,6 @@ async fn switch_endpoint(
 ) -> Result<Endpoint, String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    services.ensure_idle().await?;
     let endpoint = services.api.switch_endpoint(Some(index))?;
     let mut prefs = services.preferences.lock().await;
     prefs.endpoint_index = index;
@@ -148,6 +275,8 @@ async fn switch_endpoint(
         services
             .write_agent_config(&app, &config, &endpoint.base_url)
             .await?;
+        services.engines.shutdown_idle().await;
+        spawn_boot(app.clone());
     }
     Ok(endpoint)
 }
@@ -213,6 +342,9 @@ async fn login(
     }
     let result = services.auth.login(email, password, None, None).await?;
     *services.user.lock().await = result.user.clone();
+    if result.user.is_some() {
+        spawn_boot(app.clone());
+    }
     Ok(result)
 }
 
@@ -236,6 +368,9 @@ async fn complete_two_factor(
         )
         .await?;
     *services.user.lock().await = result.user.clone();
+    if result.user.is_some() {
+        spawn_boot(app.clone());
+    }
     Ok(result)
 }
 
@@ -243,23 +378,23 @@ async fn complete_two_factor(
 async fn logout(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    if let Some(engine) = services.engine.lock().await.take() {
-        engine.cancel_all().await;
-    }
+    services.drop_engine().await;
     services.auth.logout().await?;
     *services.user.lock().await = None;
     Ok(())
 }
 
 #[tauri::command]
-async fn get_groups(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Group>, String> {
+async fn get_groups(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    refresh: Option<bool>,
+) -> Result<Vec<Group>, String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    let groups = services.auth.groups().await?;
-    Ok(groups
-        .into_iter()
-        .filter(|g| matches!(g.platform.as_str(), "anthropic" | "claude" | "openai"))
-        .collect())
+    services
+        .catalog_groups(&app, refresh.unwrap_or(false))
+        .await
 }
 
 #[tauri::command]
@@ -267,23 +402,13 @@ async fn get_group_models(
     app: AppHandle,
     state: State<'_, AppState>,
     group_id: i64,
+    refresh: Option<bool>,
 ) -> Result<Vec<GroupModel>, String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    let user = services
-        .auth
-        .current_user()
-        .await?
-        .ok_or("Sign in before listing models")?;
-    *services.user.lock().await = Some(user.clone());
-    let groups = services.auth.groups().await?;
-    let allowed = groups.iter().any(|group| {
-        group.id == group_id && matches!(group.platform.as_str(), "anthropic" | "claude" | "openai")
-    });
-    if !allowed {
-        return Err("The selected group is not available for this account".into());
-    }
-    services.auth.group_models(group_id, user.id).await
+    services
+        .catalog_models(&app, group_id, refresh.unwrap_or(false))
+        .await
 }
 
 #[tauri::command]
@@ -293,31 +418,40 @@ async fn configure(
     group_id: Option<i64>,
     model: Option<String>,
     workspace: Option<String>,
+    reasoning_effort: Option<String>,
+    permission_mode: Option<String>,
 ) -> Result<ConfigSummary, String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    services.ensure_idle().await?;
     let user = services
         .auth
         .current_user()
         .await?
         .ok_or("Sign in before configuring OpenCode")?;
     *services.user.lock().await = Some(user.clone());
-    let groups = services.auth.groups().await?;
+    let mut groups = services.catalog_groups(&app, false).await?;
+    if let Some(id) = group_id {
+        if !groups.iter().any(|group| group.id == id) {
+            groups = services.catalog_groups(&app, true).await?;
+        }
+    }
     let group = groups
         .iter()
-        .find(|g| {
-            group_id.is_none_or(|id| id == g.id)
-                && matches!(g.platform.as_str(), "anthropic" | "claude" | "openai")
-        })
+        .find(|group| group_id.is_none_or(|id| id == group.id))
+        .cloned()
         .ok_or("No supported API group is available for this account")?;
-    let model = model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
-        if group.platform == "openai" {
-            "gpt-5.2".into()
-        } else {
-            "claude-sonnet-4-6".into()
-        }
-    });
+    let mut model = model
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config::default_model_for(&group.platform));
+    if model.is_empty() {
+        model = services
+            .catalog_models(&app, group.id, false)
+            .await?
+            .into_iter()
+            .next()
+            .map(|item| item.id)
+            .ok_or_else(|| "Select a model".to_owned())?;
+    }
     if model.len() > 160
         || !model
             .bytes()
@@ -327,6 +461,21 @@ async fn configure(
     }
     let directory = config::working_directory(&app, workspace).await?;
     let _api_key = zeroize::Zeroizing::new(services.auth.ensure_api_key(group.id, user.id).await?);
+    let (enabled, previous, previous_effort, previous_permission) = {
+        let prefs = services.preferences.lock().await;
+        (
+            prefs.enabled_plugins.clone(),
+            prefs.config.clone(),
+            prefs
+                .config
+                .as_ref()
+                .map(|config| config.reasoning_effort.clone()),
+            prefs
+                .config
+                .as_ref()
+                .map(|config| config.permission_mode.clone()),
+        )
+    };
     let summary = ConfigSummary {
         group_id: group.id,
         group_name: group.name.clone(),
@@ -338,8 +487,17 @@ async fn configure(
             .into_owned(),
         working_directory: directory.to_string_lossy().into_owned(),
         user_id: user.id,
+        reasoning_effort: config::normalize_reasoning_effort(
+            reasoning_effort
+                .as_deref()
+                .or(previous_effort.as_deref()),
+        ),
+        permission_mode: config::normalize_permission_mode(
+            permission_mode
+                .as_deref()
+                .or(previous_permission.as_deref()),
+        ),
     };
-    let enabled = services.preferences.lock().await.enabled_plugins.clone();
     config::write_opencode_config(
         &app,
         &summary,
@@ -352,7 +510,17 @@ async fn configure(
     prefs.endpoint_index = services.api.endpoint().index;
     config::remember_workspace(&mut prefs, summary.working_directory.clone());
     config::save(&app, prefs.clone()).await?;
-    *services.engine.lock().await = None;
+    drop(prefs);
+    let workspace_only = previous.as_ref().is_some_and(|prev| {
+        prev.group_id == summary.group_id
+            && prev.model == summary.model
+            && prev.reasoning_effort == summary.reasoning_effort
+            && prev.permission_mode == summary.permission_mode
+    });
+    if !workspace_only {
+        services.engines.shutdown_idle().await;
+    }
+    spawn_boot(app.clone());
     Ok(summary)
 }
 
@@ -386,7 +554,6 @@ async fn choose_workspace(
     state: State<'_, AppState>,
 ) -> Result<Option<ConfigSummary>, String> {
     let services = state.services(&app).await?;
-    services.ensure_idle().await?;
     let current = services
         .preferences
         .lock()
@@ -407,25 +574,101 @@ async fn choose_workspace(
             .unwrap_or((None, None))
     };
     Ok(Some(
-        configure(app, state, group_id, model, Some(workspace)).await?,
+        configure(app, state, group_id, model, Some(workspace), None, None).await?,
     ))
 }
 
 #[tauri::command]
-async fn reveal_workspace(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+async fn reveal_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
     let services = state.services(&app).await?;
-    let path = services
-        .preferences
-        .lock()
-        .await
-        .config
-        .as_ref()
-        .map(|config| config.working_directory.clone())
-        .ok_or_else(|| "Choose a workspace before opening it".to_owned())?;
-    tokio::task::spawn_blocking(move || open::that(&path))
+    let requested = path.filter(|value| !value.trim().is_empty());
+    let target = match requested {
+        Some(value) => value,
+        None => services
+            .preferences
+            .lock()
+            .await
+            .config
+            .as_ref()
+            .map(|config| config.working_directory.clone())
+            .ok_or_else(|| "Choose a workspace before opening it".to_owned())?,
+    };
+    open_directory(&app, target).await
+}
+
+async fn open_directory(app: &AppHandle, path: String) -> Result<(), String> {
+    let directory = config::working_directory(app, Some(path)).await?;
+    let display = directory.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || open::that(&display))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn workspace_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: String,
+    path: String,
+    name: Option<String>,
+) -> Result<WorkspaceActionResult, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("Choose a workspace".into());
+    }
+    if path.len() > 1024 {
+        return Err("Invalid workspace path".into());
+    }
+    let path = path.to_owned();
+    let services = state.services(&app).await?;
+    match action.as_str() {
+        "reveal" => {
+            open_directory(&app, path).await?;
+            let prefs = services.preferences.lock().await;
+            Ok(config::workspace_action_result(&prefs, None))
+        }
+        "pin" | "unpin" | "rename" | "remove" | "create_worktree" => {
+            let _guard = services.mutation.lock().await;
+            if action == "remove" {
+                services
+                    .engines
+                    .shutdown_workspace(std::path::Path::new(&path))
+                    .await;
+            }
+            let mut switch_to = None;
+            if action == "create_worktree" {
+                let dest = config::create_git_worktree(std::path::Path::new(&path)).await?;
+                switch_to = Some(dest.to_string_lossy().into_owned());
+            }
+            let mut prefs = services.preferences.lock().await;
+            match action.as_str() {
+                "pin" => config::pin_workspace(&mut prefs, &path, true),
+                "unpin" => config::pin_workspace(&mut prefs, &path, false),
+                "rename" => {
+                    config::rename_workspace(&mut prefs, &path, name.as_deref().unwrap_or(""))
+                }
+                "remove" => {
+                    if config::forget_workspace(&mut prefs, &path) {
+                        switch_to = Some(config::next_workspace(&prefs).unwrap_or_default());
+                    }
+                }
+                "create_worktree" => {
+                    if let Some(dest) = switch_to.as_ref() {
+                        config::remember_workspace(&mut prefs, dest.clone());
+                    }
+                }
+                _ => {}
+            }
+            config::save(&app, prefs.clone()).await?;
+            Ok(config::workspace_action_result(&prefs, switch_to))
+        }
+        _ => Err("Unknown workspace action".into()),
+    }
 }
 
 #[tauri::command]
@@ -444,7 +687,6 @@ async fn install_plugin(
     state: State<'_, AppState>,
 ) -> Result<Vec<PluginInfo>, String> {
     let services = state.services(&app).await?;
-    services.ensure_idle().await?;
     let Some(source) = pick_folder_path(&app, "选择插件目录", None).await? else {
         return harness::list_plugins(&app, &services.preferences.lock().await.enabled_plugins)
             .await;
@@ -462,7 +704,8 @@ async fn install_plugin(
         services
             .write_agent_config(&app, &summary, services.api.get_current_base_url())
             .await?;
-        *services.engine.lock().await = None;
+        services.engines.shutdown_idle().await;
+        spawn_boot(app.clone());
     }
     wasm_ipc::reload(&app, &enabled).await?;
     harness::list_plugins(&app, &enabled).await
@@ -479,7 +722,6 @@ async fn set_plugin_enabled(
         return Err("Invalid plugin id".into());
     }
     let services = state.services(&app).await?;
-    services.ensure_idle().await?;
     let mut prefs = services.preferences.lock().await;
     if enabled {
         if !prefs.enabled_plugins.iter().any(|item| item == &id) {
@@ -496,7 +738,8 @@ async fn set_plugin_enabled(
         services
             .write_agent_config(&app, &summary, services.api.get_current_base_url())
             .await?;
-        *services.engine.lock().await = None;
+        services.engines.shutdown_idle().await;
+        spawn_boot(app.clone());
     }
     wasm_ipc::reload(&app, &enabled_ids).await?;
     harness::list_plugins(&app, &enabled_ids).await
@@ -512,7 +755,6 @@ async fn uninstall_plugin(
         return Err("Invalid plugin id".into());
     }
     let services = state.services(&app).await?;
-    services.ensure_idle().await?;
     harness::uninstall(&app, &id).await?;
     let mut prefs = services.preferences.lock().await;
     prefs.enabled_plugins.retain(|item| item != &id);
@@ -524,7 +766,8 @@ async fn uninstall_plugin(
         services
             .write_agent_config(&app, &summary, services.api.get_current_base_url())
             .await?;
-        *services.engine.lock().await = None;
+        services.engines.shutdown_idle().await;
+        spawn_boot(app.clone());
     }
     wasm_ipc::reload(&app, &enabled).await?;
     harness::list_plugins(&app, &enabled).await
@@ -557,18 +800,18 @@ async fn start_stream(
     request_id: String,
     prompt: String,
     session_id: Option<String>,
+    workspace: Option<String>,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    services.ensure_idle().await?;
     let user = services
         .user
         .lock()
         .await
         .clone()
         .ok_or("Sign in before starting the agent")?;
-    let summary = services
+    let mut summary = services
         .preferences
         .lock()
         .await
@@ -576,20 +819,28 @@ async fn start_stream(
         .clone()
         .filter(|c| c.user_id == user.id)
         .ok_or("Configure your API group before starting the agent")?;
+    if let Some(path) = workspace.filter(|value| !value.trim().is_empty()) {
+        summary.working_directory = config::working_directory(&app, Some(path))
+            .await?
+            .to_string_lossy()
+            .into_owned();
+    }
     let key = tauri_plugin_secure_store::get_secret(&auth::api_key_secret_name(
         user.id,
         summary.group_id,
     ))
     .await?
     .ok_or("The API key is unavailable. Run configuration again.")?;
-    let enabled = services.preferences.lock().await.enabled_plugins.clone();
-    config::write_opencode_config(
-        &app,
-        &summary,
-        services.api.get_current_base_url(),
-        &enabled,
-    )
-    .await?;
+    let endpoint = services.api.reachable_endpoint().await?;
+    let enabled = {
+        let mut prefs = services.preferences.lock().await;
+        if prefs.endpoint_index != endpoint.index {
+            prefs.endpoint_index = endpoint.index;
+            config::save(&app, prefs.clone()).await?;
+        }
+        prefs.enabled_plugins.clone()
+    };
+    config::write_opencode_config(&app, &summary, &endpoint.base_url, &enabled).await?;
     let engine = services.engine(&app, &summary).await?;
     engine
         .start(
@@ -602,10 +853,36 @@ async fn start_stream(
                 config_path: summary.config_path.into(),
                 api_key: key,
                 model: Some(format!("sub2api/{}", summary.model)),
+                reasoning_effort: Some(config::normalize_reasoning_effort(Some(
+                    &summary.reasoning_effort,
+                ))),
             },
             on_event,
         )
         .await
+}
+
+#[tauri::command]
+async fn list_conversations(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<HistorySnapshot, String> {
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let user = services.require_user("listing conversations").await?;
+    history::load(&app, user.id).await
+}
+
+#[tauri::command]
+async fn save_conversations(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    history: HistorySnapshot,
+) -> Result<(), String> {
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let user = services.require_user("saving conversations").await?;
+    history::save(&app, user.id, history).await
 }
 
 #[tauri::command]
@@ -616,10 +893,7 @@ async fn ack_stream(
     sequence: u64,
 ) -> Result<(), String> {
     let services = state.services(&app).await?;
-    if let Some(engine) = services.engine.lock().await.clone() {
-        engine.acknowledge(&request_id, sequence).await?;
-    }
-    Ok(())
+    services.engines.acknowledge(&request_id, sequence).await
 }
 
 #[tauri::command]
@@ -629,10 +903,7 @@ async fn cancel_stream(
     request_id: String,
 ) -> Result<(), String> {
     let services = state.services(&app).await?;
-    if let Some(engine) = services.engine.lock().await.clone() {
-        engine.cancel(&request_id).await?;
-    }
-    Ok(())
+    services.engines.cancel(&request_id).await
 }
 
 #[tauri::command]
@@ -641,14 +912,10 @@ async fn get_engine_status(
     state: State<'_, AppState>,
 ) -> Result<EngineHealth, String> {
     let services = state.services(&app).await?;
-    if let Some(engine) = services.engine.lock().await.clone() {
-        return Ok(engine.health().await);
-    }
-    Ok(
-        Engine::new(config::sidecar_path(&app)?, config::app_directory(&app)?)
-            .health()
-            .await,
-    )
+    Ok(services
+        .engines
+        .health(&config::sidecar_path(&app)?)
+        .await)
 }
 
 fn native_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
@@ -671,12 +938,15 @@ fn native_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
             configure,
             choose_workspace,
             reveal_workspace,
+            workspace_action,
             list_plugins,
             install_plugin,
             set_plugin_enabled,
             uninstall_plugin,
             list_plugin_uis,
             list_plugin_mixins,
+            list_conversations,
+            save_conversations,
             start_stream,
             ack_stream,
             cancel_stream,
@@ -703,9 +973,7 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(services) = app.state::<AppState>().services.get() {
                     tauri::async_runtime::block_on(async {
-                        if let Some(engine) = services.engine.lock().await.as_ref() {
-                            engine.cancel_all().await;
-                        }
+                        services.engines.shutdown_all().await;
                     });
                 }
             }

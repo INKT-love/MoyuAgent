@@ -1,5 +1,5 @@
 use super::harness;
-use extism::{Manifest, Plugin, PluginBuilder, Wasm, convert::Json};
+use extism::{convert::Json, Manifest, Plugin, PluginBuilder, Wasm};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Mutex;
@@ -48,7 +48,9 @@ struct WasmEngine {
 
 impl WasmEngine {
     fn empty() -> Self {
-        Self { plugins: Vec::new() }
+        Self {
+            plugins: Vec::new(),
+        }
     }
 
     fn load(&mut self, id: String, bytes: Vec<u8>) -> Result<(), String> {
@@ -113,10 +115,7 @@ pub async fn reload(app: &AppHandle, enabled: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn intercept<R: Runtime>(
-    invoke: Invoke<R>,
-    inner: impl Fn(Invoke<R>) -> bool,
-) -> bool {
+pub fn intercept<R: Runtime>(invoke: Invoke<R>, inner: impl Fn(Invoke<R>) -> bool) -> bool {
     let command = invoke.message.command().to_string();
     let args = match invoke.message.payload() {
         InvokeBody::Json(value) => value.clone(),
@@ -147,7 +146,10 @@ mod tests {
 
     #[test]
     fn wasm_hook_output_continue_is_default() {
-        assert!(matches!(parse_before(HookOutput::default()), Before::Continue));
+        assert!(matches!(
+            parse_before(HookOutput::default()),
+            Before::Continue
+        ));
     }
 
     #[test]
@@ -175,8 +177,8 @@ mod tests {
 
     #[test]
     fn bundled_probe_wasm_hooks_engine_status() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources/harness/probe/backend.wasm");
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/harness/probe/backend.wasm");
         let bytes = std::fs::read(&path).expect("probe backend.wasm must be built");
         let mut engine = WasmEngine::empty();
         engine.load("probe".into(), bytes).unwrap();
