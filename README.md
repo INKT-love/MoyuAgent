@@ -34,7 +34,7 @@ On Windows, run this from a Visual Studio Developer PowerShell, or first dot-sou
 
 | Step | Implementation | Verification |
 | --- | --- | --- |
-| 1 | `services/api_client.rs`, `services/auth.rs`, `services/config.rs`, `components/Settings.tsx` | Sign in with the account email/password, accept the service's actual agreement, then inspect Settings. Login automatically loads groups and configures the first supported group. Switch between the two endpoints and restart the app to verify persistence. |
+| 1 | `services/api_client.rs`, `services/auth.rs`, `services/config.rs`, `components/Settings.tsx` | Sign in with the account email/password, accept the service's actual agreement, then inspect Settings. Login automatically loads groups and configures the first available group. Switch between the two endpoints and restart the app to verify persistence. |
 | 2 | `services/opencode.rs`, `resources/stream-bridge.mjs`, `scripts/prepare-sidecar.mjs` | `npm run test:sidecar` runs the real CLI against a local Anthropic SSE server and prints token deltas in the terminal. |
 | 3 | `services/stream.rs`, Tauri `Channel<StreamEvent>` | `cargo test --manifest-path src-tauri/Cargo.toml --lib` covers bounded queues, ACK flow control, cancellation, terminal delivery and recovery after startup failure. |
 | 4 | `App.tsx`, `lib/stream-controller.ts` | `npm test` covers immediate first-chunk rendering, 16ms batching, terminal flushing, duplicate filtering, ACK timing, timeouts and unlisten. `npm run test:ui` checks browser interaction and desktop/mobile screenshots using a clearly separate IPC fixture. |
@@ -45,10 +45,9 @@ Real account login, remote API-key creation and paid inference require your acco
 ## Streaming Architecture
 
 ```text
-OpenCode provider SSE
-  -> local plugin message.part.delta hook
-  -> bounded OS stdout pipe (JSONL)
-  -> Tokio AsyncBufReadExt, maximum 1 MiB per line
+Persistent `opencode serve` (loopback, ephemeral port, basic auth)
+  -> POST /session and POST /session/{id}/prompt_async
+  -> GET /event SSE (`message.part.delta` / `session.idle` / `session.error`)
   -> tokio::sync::mpsc::channel(100)
   -> Tauri Channel, monotonic request sequence, <=128 unacknowledged events
   -> first chunk immediately; subsequent text coalesced for 16ms
@@ -56,26 +55,24 @@ OpenCode provider SSE
   -> exactly one Completed / Failed / Cancelled terminal for each accepted stream
 ```
 
-Stock `opencode run --format json` emits completed text parts, so it does not provide token-by-token output on its own. The shipped plugin forwards actual OpenCode text-delta events as JSONL. Rust suppresses the duplicate completed text. The bridge's synchronous pipe writes intentionally apply OS backpressure because OpenCode does not await plugin event promises. No global Tauri Event is used for conversation data.
+OpenCode starts with the signed-in, configured app and stays running. Each workspace has its own serve process; conversations in different sessions can prompt at the same time, and Stop cancels only that request. The same OpenCode session cannot run two prompts at once. Idle serves restart when `opencode.json`, plugins, the selected API line, or the group API key change; a busy serve keeps its current process so in-flight work is not aborted. Health is `GET /global/health` on the live servers, or a sidecar-exists check before one has started. Windows Job Objects and Unix process groups still cover each serve process tree. A task that has already received its prompt is not automatically replayed after a crash because it may have changed files or executed commands. Terminal delivery is best effort when a window is already closed; the dead frontend cannot receive events, but Rust still aborts the session and keeps the server for the next request.
 
-An mpsc bound alone does not bound Tauri's IPC queue. The ACK window supplies end-to-end flow control. A reserved terminal slot bypasses a saturated ACK window, and frontend cancellation is independent of stdout reads. stdout, stderr, process exit, cancellation and the watchdog are serviced independently. stderr is continuously drained without logging credentials or prompt contents.
+An mpsc bound alone does not bound Tauri's IPC queue. The ACK window supplies end-to-end flow control. A reserved terminal slot bypasses a saturated ACK window, and frontend cancellation is independent of the SSE reader.
 
-Limits: 64 KiB prompt, 1 MiB JSONL line, 16 KiB forwarded chunk, 32 MiB total CLI output; 5s heartbeat, 30s ACK timeout, 180s idle timeout, 30-minute total runtime. The UI has its own 30s connection watchdog. Bounds produce a clear failure rather than indefinite loading or uncontrolled allocation.
-
-The startup health probe executes `opencode --version` with a 3s timeout and one automatic retry. Each request uses a fresh child, optionally resuming an OpenCode session. The process is killed/reaped on cancellation or failure; Windows Job Objects and Unix process groups cover descendants. A task that has already received its prompt is not automatically replayed after a crash because it may have changed files or executed commands. The next request starts a new process. Terminal delivery is best effort when a window is already closed; the dead frontend cannot receive events, but Rust still cancels and cleans up the child.
+Limits: 64 KiB prompt, 1 MiB SSE event, 16 KiB forwarded chunk, 32 MiB total event bytes; 5s heartbeat, 30s ACK timeout, 180s idle timeout, 30-minute total runtime. The UI has its own 30s connection watchdog. Bounds produce a clear failure rather than indefinite loading or uncontrolled allocation.
 
 ## Authentication and Configuration
 
-- Primary: `https://inktandwkx.top`; backup: `https://inkaicf.flymiku.top`.
+- Primary: `https://api.inktandwkx.top`; backup: `https://inkaicf.flymiku.top`.
 - Sub2API account/configuration requests go through `ApiClient`. Connection failures, timeouts and temporary gateway failures switch the selected endpoint and retry once. Authentication errors do not retry. Redirects are disabled to keep credentials on the selected host.
 - Verified account APIs: `/api/v1/settings/public`, `/api/v1/auth/login`, `/api/v1/auth/login/2fa`, `/api/v1/auth/me`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`, `/api/v1/groups/available`, `/api/v1/keys`.
 - Response codes support the deployment's numeric success and string error envelopes. Error responses do not echo raw request/response bodies into the UI.
 - The key creation request uses one stable `Idempotency-Key` and a cryptographically random `custom_key` across retries. A pending record is saved in the OS vault before submission; ambiguous failures can be retried without creating unrelated duplicate keys. A 409 is reconciled against the same account/group/key.
 - API keys are scoped by account ID and group ID. Switching accounts cannot silently reuse another account's local configuration. Existing keys are reused; logout removes access/refresh tokens, while generated group API keys stay in the OS vault for the next login. Revoke a key in Sub2API to invalidate it server-side.
-- `tauri-plugin-store` saves only endpoint and non-secret configuration metadata. The app writes `opencode.json` and the streaming plugin under `app.path().app_data_dir()`, and uses an app-owned default workspace unless you choose a directory.
-- OpenCode configuration contains the `{env:SUB2API_API_KEY}` reference, never the actual key. Rust injects the selected group's key only into the child environment. OpenCode connects to the currently selected model endpoint; an interrupted model generation fails explicitly and can be resent after switching endpoints.
-- Supported provider groups are Anthropic and OpenAI. The model name is editable in Settings because actual model availability and aliases depend on the account. Defaults are `claude-sonnet-4-6` and `gpt-5.2`; unsupported platform groups are not silently mapped to the wrong protocol.
-- OpenCode can read, edit and execute commands in the configured workspace. Its external-directory permission is denied. OpenCode retains its own local session database; the current desktop recent-task list is in memory.
+- `tauri-plugin-store` saves endpoint, non-secret configuration metadata, the cached group/model catalog, and per-account chat history. The app writes `opencode.json` and the streaming plugin under `app.path().app_data_dir()`, and uses an app-owned default workspace unless you choose a directory.
+- OpenCode configuration contains the `{env:SUB2API_API_KEY}` reference, never the actual key. Rust injects the selected group's key only into the persistent serve process environment. OpenCode connects to the currently selected model endpoint; an interrupted model generation fails explicitly and can be resent after switching endpoints.
+- Settings lists every active Sub2API group. Groups and models are fetched on first use, then persisted locally; the model tab has refresh buttons for both. Anthropic/Claude groups use `@ai-sdk/anthropic`; other platforms use the OpenAI-compatible SDK. Defaults are `claude-sonnet-4-6` and `gpt-5.2` when the platform has no catalog yet.
+- OpenCode can read, edit and execute commands in the configured workspace. The composer permission chip defaults to 帮我批准 (`external_directory` denied, internet allowed). 请求批准 also denies `webfetch` / `websearch`; 完全访问 allows internet and files outside the workspace. OpenCode retains its own local session database. The desktop conversation list is stored per account in `conversations.json`; recent workspaces stay in `settings.json`. Switching accounts does not show another user's chats.
 
 ## Tauri v2 Compatibility
 
@@ -106,4 +103,4 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib operating_system_vault_rou
 
 `scripts/verify-native.mjs` tests actual Windows Tauri IPC, engine health, denied direct store access, public settings, automatic failover and agreement display. It requires a debug app launched with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`. Keep that flag out of normal launches.
 
-The CI workflow runs frontend build/tests and Rust tests across Windows, macOS and Linux. Cross-platform CI is provided but has not been executed from this local workspace. Windows native compilation and local tests are the verified platform here. During verification the primary hostname failed TLS negotiation on this machine while the backup responded successfully; this is an observation of the local network, not a global availability claim.
+The CI workflow runs frontend build/tests and Rust tests across Windows, macOS and Linux. Cross-platform CI is provided but has not been executed from this local workspace. Windows native compilation and local tests are the verified platform here.

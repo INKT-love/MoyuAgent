@@ -19,10 +19,11 @@ try {
     window.__smoke = {
       commands: [],
       acknowledgements: [],
+      streamRequests: [],
       requireTwoFactor: false,
     };
     const endpoints = [
-      { index: 0, name: "主线路", baseUrl: "https://inktandwkx.top" },
+      { index: 0, name: "主线路", baseUrl: "https://api.inktandwkx.top" },
       {
         index: 1,
         name: "备用线路(CF)",
@@ -35,10 +36,14 @@ try {
       authenticated: false,
       user: null,
       config: null,
+      recentWorkspaces: [],
+      pinnedWorkspaces: [],
+      workspaceLabels: {},
     };
+    let history = { activeId: "", conversations: [] };
     let callbackId = 1;
     const callbacks = new Map();
-    let active;
+    const streams = new Map();
     const loginResult = () => {
       snapshot = {
         ...snapshot,
@@ -48,6 +53,7 @@ try {
       return { user: snapshot.user, requiresTwoFactor: false, tempToken: null };
     };
     window.__TAURI_INTERNALS__ = {
+      metadata: { currentWindow: { label: "main" } },
       transformCallback(callback) {
         const id = callbackId++;
         callbacks.set(id, callback);
@@ -105,12 +111,73 @@ try {
             return snapshot.config;
           case "reveal_workspace":
             return;
+          case "workspace_action": {
+            const path = payload.path || "";
+            const same = (left, right) =>
+              String(left).replace(/\\/g, "/").toLowerCase() ===
+              String(right).replace(/\\/g, "/").toLowerCase();
+            snapshot.recentWorkspaces = snapshot.recentWorkspaces || [];
+            snapshot.pinnedWorkspaces = snapshot.pinnedWorkspaces || [];
+            snapshot.workspaceLabels = snapshot.workspaceLabels || {};
+            let switchTo = null;
+            if (payload.action === "pin")
+              snapshot.pinnedWorkspaces = [
+                path,
+                ...snapshot.pinnedWorkspaces.filter((item) => !same(item, path)),
+              ];
+            else if (payload.action === "unpin")
+              snapshot.pinnedWorkspaces = snapshot.pinnedWorkspaces.filter(
+                (item) => !same(item, path),
+              );
+            else if (payload.action === "rename") {
+              const name = String(payload.name || "").trim();
+              const labels = { ...snapshot.workspaceLabels };
+              for (const key of Object.keys(labels))
+                if (same(key, path)) delete labels[key];
+              if (name) labels[path] = name;
+              snapshot.workspaceLabels = labels;
+            } else if (payload.action === "remove") {
+              const wasCurrent = same(snapshot.config?.workspace || "", path);
+              snapshot.recentWorkspaces = snapshot.recentWorkspaces.filter(
+                (item) => !same(item, path),
+              );
+              snapshot.pinnedWorkspaces = snapshot.pinnedWorkspaces.filter(
+                (item) => !same(item, path),
+              );
+              const labels = { ...snapshot.workspaceLabels };
+              for (const key of Object.keys(labels))
+                if (same(key, path)) delete labels[key];
+              snapshot.workspaceLabels = labels;
+              if (wasCurrent)
+                switchTo =
+                  snapshot.pinnedWorkspaces[0] ||
+                  snapshot.recentWorkspaces[0] ||
+                  "";
+            } else if (payload.action === "create_worktree") {
+              switchTo = `${path}-worktree`;
+              snapshot.recentWorkspaces = [
+                switchTo,
+                ...snapshot.recentWorkspaces.filter((item) => !same(item, switchTo)),
+              ];
+            }
+            return {
+              recentWorkspaces: snapshot.recentWorkspaces,
+              pinnedWorkspaces: snapshot.pinnedWorkspaces,
+              workspaceLabels: snapshot.workspaceLabels,
+              switchTo,
+            };
+          }
           case "list_plugins":
             return [];
           case "list_plugin_uis":
             return [];
           case "list_plugin_mixins":
             return [];
+          case "list_conversations":
+            return history;
+          case "save_conversations":
+            history = payload.history || { activeId: "", conversations: [] };
+            return;
           case "install_plugin":
           case "set_plugin_enabled":
           case "uninstall_plugin":
@@ -127,7 +194,22 @@ try {
                 model: payload.model,
                 workspace: payload.workspace || "D:/workspace/project",
                 configPath: "D:/app-data/opencode.json",
+                reasoningEffort:
+                  payload.reasoningEffort ||
+                  snapshot.config?.reasoningEffort ||
+                  "high",
+                permissionMode:
+                  payload.permissionMode ||
+                  snapshot.config?.permissionMode ||
+                  "assist",
               },
+              recentWorkspaces: [
+                payload.workspace || "D:/workspace/project",
+                ...(snapshot.recentWorkspaces || []).filter(
+                  (item) =>
+                    item !== (payload.workspace || "D:/workspace/project"),
+                ),
+              ],
             };
             return snapshot.config;
           case "ack_stream":
@@ -136,6 +218,12 @@ try {
           case "start_stream": {
             if (!payload.requestId || !payload.prompt || !payload.onEvent)
               throw new Error("Invalid test stream arguments");
+            window.__smoke.streamRequests.push({
+              requestId: payload.requestId,
+              prompt: payload.prompt,
+              sessionId: payload.sessionId,
+              workspace: payload.workspace,
+            });
             let index = 0;
             let done = false;
             const emit = (event) =>
@@ -147,13 +235,15 @@ try {
                   ...event,
                 },
               });
-            active = () => {
+            const stop = () => {
               if (!done) {
                 done = true;
+                streams.delete(payload.requestId);
                 emit({ kind: "cancelled" });
                 callbacks.get(payload.onEvent.id)?.({ index, end: true });
               }
             };
+            streams.set(payload.requestId, stop);
             emit({
               kind: "chunk",
               text: "已读取工作区。",
@@ -171,6 +261,7 @@ try {
               setTimeout(() => {
                 if (!done) {
                   done = true;
+                  streams.delete(payload.requestId);
                   emit({ kind: "completed", sessionId: "test-session" });
                   callbacks.get(payload.onEvent.id)?.({ index, end: true });
                 }
@@ -179,7 +270,11 @@ try {
             return;
           }
           case "cancel_stream":
-            active?.();
+            streams.get(payload.requestId)?.();
+            return;
+          case "plugin:event|listen":
+            return callbackId++;
+          case "plugin:event|unlisten":
             return;
           default:
             if (typeof command === "string" && command.startsWith("plugin:window|")) {
@@ -196,7 +291,22 @@ try {
   await page.getByLabel("密码", { exact: true }).fill("test-password");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByLabel("任务内容")).toBeEnabled();
+  await page.getByRole("button", { name: "选择模型" }).click();
+  await expect(page.getByRole("dialog", { name: "选择分组" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "默认分组" })).toBeVisible();
+  await expect(page.locator(".settings-page")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".model-picker")).toHaveCount(0);
+  await page.getByRole("button", { name: "选择权限" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "应如何批准墨羽操作？" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^请求批准/ })).toBeVisible();
+  await expect(page.locator(".settings-page")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".permission-picker")).toHaveCount(0);
   await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("tab", { name: "线路" }).click();
   await page.getByLabel("API 线路").first().selectOption("1");
   await expect(
     page.getByText("https://inkaicf.flymiku.top", { exact: true }),
@@ -208,15 +318,76 @@ try {
     "已读取工作区。",
   );
   await expect(page.getByRole("button", { name: "停止任务" })).toBeVisible();
+  await expect(page.locator(".new-chat-button")).toBeEnabled();
+  await page.locator(".new-chat-button").click();
+  await expect(page.locator(".topbar-title strong")).toHaveText("新任务");
+  await expect(page.getByRole("button", { name: "发送任务" })).toBeVisible();
+  await page.getByLabel("任务内容").fill("并行任务");
+  await page.getByRole("button", { name: "发送任务" }).click();
+  await expect(page.getByRole("button", { name: "停止任务" })).toBeVisible();
+  const streamPayloads = await page.evaluate(
+    () => window.__smoke.streamRequests,
+  );
+  expect(streamPayloads.length).toBeGreaterThanOrEqual(2);
+  expect(streamPayloads.at(-1).workspace).toBe("D:/workspace/project");
+  await page.getByRole("button", { name: "检查项目配置", exact: true }).click();
+  await expect(page.getByText("检查项目配置").first()).toBeVisible();
+  await expect(page.locator(".assistant-message .message-content").last()).toContainText(
+    "已读取工作区。",
+  );
+  await expect(page.locator(".message-cancelled")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "停止任务" }),
   ).not.toBeVisible();
   await expect(page.locator(".message-content").last()).toContainText(
     "检查完成，配置有效。",
   );
+  const workspaceRow = page.getByRole("button", { name: "project", exact: true });
+  const sessionOpen = page.getByRole("button", { name: "检查项目配置", exact: true });
+  await expect(workspaceRow).toHaveAttribute("aria-expanded", "true");
+  await expect(sessionOpen).toBeVisible();
+  await workspaceRow.click();
+  await expect(workspaceRow).toHaveAttribute("aria-expanded", "false");
+  await expect(sessionOpen).toHaveCount(0);
+  await workspaceRow.click();
+  await expect(workspaceRow).toHaveAttribute("aria-expanded", "true");
+  await expect(sessionOpen).toBeVisible();
+  const projectWrap = page.locator(".workspace-row-wrap").filter({ has: workspaceRow });
+  await projectWrap.hover();
+  await expect(projectWrap.getByRole("button", { name: "更多选项" })).toBeVisible();
+  await expect(projectWrap.getByRole("button", { name: "添加新会话" })).toBeVisible();
+  await projectWrap.getByRole("button", { name: "更多选项" }).click();
+  await expect(page.getByRole("menuitem", { name: "置顶" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "编辑" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "在资源管理器中打开" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "创建永久工作树" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "归档聊天" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "移除项目" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "置顶" }).click();
+  await expect(workspaceRow).toHaveAttribute("aria-expanded", "true");
+  await projectWrap.hover();
+  await projectWrap.getByRole("button", { name: "更多选项" }).click();
+  await expect(page.getByRole("menuitem", { name: "取消置顶" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".project-menu")).toHaveCount(0);
+  await projectWrap.getByRole("button", { name: "添加新会话" }).click();
+  await expect(page.locator(".topbar-title strong")).toHaveText("新任务");
+  await expect(workspaceRow).toHaveAttribute("aria-expanded", "true");
+  const sessionRow = page.locator(".session-row").filter({ hasText: "检查项目配置" });
+  await sessionRow.hover();
+  await expect(sessionRow.getByRole("button", { name: "置顶" })).toBeVisible();
+  await expect(sessionRow.getByRole("button", { name: "归档" })).toBeVisible();
+  await sessionRow.getByRole("button", { name: "置顶" }).click();
+  await sessionRow.hover();
+  await expect(sessionRow.getByRole("button", { name: "取消置顶" })).toBeVisible();
+  await sessionRow.getByRole("button", { name: "归档" }).click();
+  await expect(sessionOpen).toHaveCount(0);
   const acks = await page.evaluate(() => window.__smoke.acknowledgements);
+  const streamCount = await page.evaluate(
+    () => window.__smoke.streamRequests.length,
+  );
   expect(acks.length).toBeGreaterThan(0);
-  expect(acks.length).toBeLessThanOrEqual(3);
+  expect(acks.length).toBeLessThanOrEqual(streamCount * 3);
   await page.getByLabel("任务内容").fill("取消测试");
   await page.getByRole("button", { name: "发送任务" }).click();
   await page.getByRole("button", { name: "停止任务" }).click();
