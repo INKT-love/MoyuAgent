@@ -12,7 +12,7 @@
   "app": {
     "windows": [{
       "label": "main",
-      "title": "墨羽Agent",
+      "title": "墨羽AGENT",
       "width": 1200,
       "height": 820,
       "minWidth": 360,
