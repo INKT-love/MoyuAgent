@@ -3,7 +3,7 @@ use super::stream::{
     MAX_CHUNK_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -17,12 +17,13 @@ use std::{
 };
 use tauri::ipc::Channel;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::{Child, Command},
-    sync::{mpsc, watch, Mutex},
+    sync::{mpsc, Mutex},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroize;
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -42,6 +43,7 @@ pub struct RunEnvironment {
     pub config_path: PathBuf,
     pub api_key: String,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 impl Drop for RunEnvironment {
@@ -79,12 +81,80 @@ pub struct EngineHealth {
     pub active_requests: usize,
 }
 
+pub const MAX_PARALLEL_REQUESTS: usize = 8;
+
+struct ActiveRequest {
+    control: Arc<FlowControl>,
+    session_id: Option<String>,
+}
+
+pub fn admit_request<'a>(
+    active_count: usize,
+    mut session_ids: impl Iterator<Item = Option<&'a str>>,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    if active_count >= MAX_PARALLEL_REQUESTS {
+        return Err("Too many agent requests are already running".into());
+    }
+    if let Some(session_id) = session_id {
+        if session_ids.any(|id| id == Some(session_id)) {
+            return Err("This conversation is already running".into());
+        }
+    }
+    Ok(())
+}
+
+struct ServerFingerprint {
+    config: Vec<u8>,
+    api_key: String,
+    working_dir: PathBuf,
+}
+
+impl Drop for ServerFingerprint {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
+    }
+}
+
+impl ServerFingerprint {
+    fn matches(&self, config: &[u8], api_key: &str, working_dir: &Path) -> bool {
+        self.config == config && self.api_key == api_key && self.working_dir == working_dir
+    }
+}
+
+struct ServerProcess {
+    child: Child,
+    _tree: ProcessTree,
+    url: String,
+    password: String,
+    fingerprint: ServerFingerprint,
+    stdout_task: JoinHandle<()>,
+    stderr_task: JoinHandle<()>,
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        self.stdout_task.abort();
+        self.stderr_task.abort();
+        let _ = self.child.start_kill();
+        self.password.zeroize();
+    }
+}
+
+#[derive(Clone)]
+struct ServerHandle {
+    url: String,
+    password: String,
+}
+
 pub struct Engine {
     executable: PathBuf,
     working_dir: PathBuf,
     limits: EngineLimits,
-    active: Mutex<HashMap<String, Arc<FlowControl>>>,
-    version_healthy: AtomicBool,
+    active: Mutex<HashMap<String, ActiveRequest>>,
+    server: Mutex<Option<ServerProcess>>,
+    http: reqwest::Client,
+    server_ready: AtomicBool,
 }
 
 impl Engine {
@@ -94,87 +164,138 @@ impl Engine {
             working_dir,
             limits: EngineLimits::default(),
             active: Mutex::new(HashMap::new()),
-            version_healthy: AtomicBool::new(false),
+            server: Mutex::new(None),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            server_ready: AtomicBool::new(false),
         }
+    }
+
+    pub fn workspace(&self) -> &Path {
+        &self.working_dir
     }
 
     pub async fn health(&self) -> EngineHealth {
-        let active_requests = self.active.lock().await.len();
-        let executable_available = if active_requests == 0 {
-            self.preflight(&CancellationToken::new()).await.is_ok()
-        } else {
-            self.version_healthy.load(Ordering::Acquire)
-        };
         EngineHealth {
-            executable_available,
-            active_requests,
+            executable_available: self.server_ready.load(Ordering::Acquire)
+                || tokio::fs::metadata(&self.executable).await.is_ok(),
+            active_requests: self.active.lock().await.len(),
         }
     }
 
-    async fn preflight(&self, cancellation: &CancellationToken) -> Result<(), StreamPayload> {
-        self.version_healthy.store(false, Ordering::Release);
-        for attempt in 0..2 {
-            if cancellation.is_cancelled() {
-                return Err(StreamPayload::Cancelled);
-            }
-            if self.probe_version(cancellation).await.is_ok() {
-                self.version_healthy.store(true, Ordering::Release);
-                return Ok(());
-            }
-            if cancellation.is_cancelled() {
-                return Err(StreamPayload::Cancelled);
-            }
-            if attempt == 0 {
-                tracing::warn!("Retrying the OpenCode startup health check");
-                tokio::select! {
-                    _ = cancellation.cancelled() => return Err(StreamPayload::Cancelled),
-                    _ = tokio::time::sleep(Duration::from_millis(300)) => {}
-                }
-            }
+    pub async fn shutdown(&self) {
+        self.cancel_all().await;
+        let mut slot = self.server.lock().await;
+        self.server_ready.store(false, Ordering::Release);
+        if let Some(server) = slot.take() {
+            stop_server(server).await;
         }
-        Err(StreamPayload::failed("preflight_failed", "OpenCode failed its startup health check after one retry. Reinstall the bundled executable."))
     }
 
-    async fn probe_version(&self, cancellation: &CancellationToken) -> io::Result<()> {
-        let mut command = Command::new(&self.executable);
-        command
-            .arg("--version")
-            .current_dir(&self.working_dir)
-            .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command.spawn()?;
-        let tree = ProcessTree::attach(&child)?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("Missing version output"))?
-            .take(129);
-        let result = tokio::select! {
-            _ = cancellation.cancelled() => Err(io::Error::other("Cancelled")),
-            result = tokio::time::timeout(Duration::from_secs(3), async {
-                let mut bytes = Vec::new();
-                stdout.read_to_end(&mut bytes).await?;
-                let status = child.wait().await?;
-                let valid_version = std::str::from_utf8(&bytes).ok().is_some_and(|text| {
-                    let version = text.trim();
-                    version.starts_with(|c: char| c.is_ascii_digit()) && version.contains('.')
-                        && version.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
-                });
-                if status.success() && bytes.len() <= 128 && valid_version { Ok(()) }
-                else { Err(io::Error::other("Invalid version response")) }
-            }) => result.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "Version check timeout"))),
+    pub async fn ensure_server(&self, environment: &RunEnvironment) -> Result<(), String> {
+        if self.active.lock().await.len() > 0 {
+            return Ok(());
+        }
+        self.ensure_server_inner(environment, &CancellationToken::new(), None)
+            .await
+            .map(|_| ())
+            .map_err(payload_message)
+    }
+
+    async fn ensure_server_inner(
+        &self,
+        environment: &RunEnvironment,
+        cancellation: &CancellationToken,
+        sender: Option<&mpsc::Sender<StreamPayload>>,
+    ) -> Result<bool, StreamPayload> {
+        if !tokio::fs::try_exists(&self.executable)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(StreamPayload::failed(
+                "sidecar_missing",
+                "The bundled OpenCode executable was not found",
+            ));
+        }
+        let config = tokio::fs::read(&environment.config_path)
+            .await
+            .map_err(|_| {
+                StreamPayload::failed(
+                    "spawn_failed",
+                    "OpenCode configuration is missing. Save your model settings and retry.",
+                )
+            })?;
+        let mut slot = self.server.lock().await;
+        if let Some(server) = slot.as_ref() {
+            let healthy = self.probe_health(&server.url, &server.password).await;
+            if healthy
+                && server
+                    .fingerprint
+                    .matches(&config, &environment.api_key, &self.working_dir)
+            {
+                self.server_ready.store(true, Ordering::Release);
+                return Ok(false);
+            }
+            // Keep a busy process so a config change does not abort other sessions.
+            if healthy && self.active.lock().await.len() > 1 {
+                self.server_ready.store(true, Ordering::Release);
+                return Ok(false);
+            }
+        }
+        if let Some(server) = slot.take() {
+            self.server_ready.store(false, Ordering::Release);
+            stop_server(server).await;
+        }
+        if cancellation.is_cancelled() {
+            return Err(StreamPayload::Cancelled);
+        }
+        if let Some(sender) = sender {
+            let _ = sender
+                .send(StreamPayload::Status {
+                    message: "Starting OpenCode".into(),
+                })
+                .await;
+        }
+        let server = self.start_server(environment, config, cancellation).await?;
+        self.server_ready.store(true, Ordering::Release);
+        *slot = Some(server);
+        Ok(true)
+    }
+
+    async fn handle(&self) -> Option<ServerHandle> {
+        self.server
+            .lock()
+            .await
+            .as_ref()
+            .map(|server| ServerHandle {
+                url: server.url.clone(),
+                password: server.password.clone(),
+            })
+    }
+
+    async fn probe_health(&self, url: &str, password: &str) -> bool {
+        let Ok(response) = self
+            .http
+            .get(format!("{url}/global/health"))
+            .basic_auth("opencode", Some(password))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        else {
+            return false;
         };
-        drop(tree);
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
-        result
+        if !response.status().is_success() {
+            return false;
+        }
+        response
+            .json::<Value>()
+            .await
+            .ok()
+            .is_some_and(|body| body.get("healthy").and_then(Value::as_bool) == Some(true))
     }
 
     pub async fn start(
@@ -197,11 +318,18 @@ impl Engine {
         let control = Arc::new(FlowControl::new());
         {
             let mut active = self.active.lock().await;
-            // One CLI at a time also prevents concurrent writes to a resumed session.
-            if !active.is_empty() {
-                return Err("An agent request is already running".into());
-            }
-            active.insert(request.request_id.clone(), Arc::clone(&control));
+            admit_request(
+                active.len(),
+                active.values().map(|item| item.session_id.as_deref()),
+                request.session_id.as_deref(),
+            )?;
+            active.insert(
+                request.request_id.clone(),
+                ActiveRequest {
+                    control: Arc::clone(&control),
+                    session_id: request.session_id.clone(),
+                },
+            );
         }
         let engine = Arc::clone(self);
         tokio::spawn(async move {
@@ -213,14 +341,19 @@ impl Engine {
     }
 
     pub async fn acknowledge(&self, request_id: &str, sequence: u64) -> Result<(), String> {
-        if let Some(control) = self.active.lock().await.get(request_id).cloned() {
-            control.acknowledge(sequence)?;
+        if let Some(active) = self.active.lock().await.get(request_id) {
+            active.control.acknowledge(sequence)?;
         }
         Ok(())
     }
 
     pub async fn cancel(&self, request_id: &str) -> Result<(), String> {
-        let control = self.active.lock().await.get(request_id).cloned();
+        let control = self
+            .active
+            .lock()
+            .await
+            .get(request_id)
+            .map(|item| Arc::clone(&item.control));
         if let Some(control) = control {
             control.cancel.cancel();
             let wait = async {
@@ -321,150 +454,95 @@ impl Engine {
         sender: mpsc::Sender<StreamPayload>,
         control: Arc<FlowControl>,
     ) -> StreamPayload {
-        let _ = sender
-            .send(StreamPayload::Status {
-                message: "Checking OpenCode".into(),
-            })
-            .await;
-        if let Err(failure) = self.preflight(&control.cancel).await {
-            return failure;
+        if !self.server_ready.load(Ordering::Acquire) {
+            let _ = sender
+                .send(StreamPayload::Status {
+                    message: "Checking OpenCode".into(),
+                })
+                .await;
         }
-        let _ = sender
-            .send(StreamPayload::Status {
-                message: "Starting OpenCode".into(),
-            })
-            .await;
-        let mut child = match self.spawn(&request, &environment, &sender, &control).await {
-            Ok(child) => child,
+        let spawned = match self
+            .ensure_server_inner(&environment, &control.cancel, Some(&sender))
+            .await
+        {
+            Ok(spawned) => spawned,
             Err(failure) => return failure,
         };
-        tracing::info!(request_id = %request.request_id, "OpenCode process started");
-        let process_tree = match ProcessTree::attach(&child) {
-            Ok(tree) => tree,
-            Err(_) => {
-                let _ = child.kill().await;
-                return StreamPayload::failed(
-                    "process_isolation",
-                    "Unable to isolate the agent process for safe cleanup",
-                );
-            }
+        if spawned {
+            let _ = sender
+                .send(StreamPayload::Status {
+                    message: "OpenCode ready".into(),
+                })
+                .await;
+        }
+        let Some(handle) = self.handle().await else {
+            return StreamPayload::failed("spawn_failed", "OpenCode is not running");
         };
-        let stdout = child
-            .stdout
-            .take()
-            .expect("stdout was configured as a pipe");
-        let stderr = child
-            .stderr
-            .take()
-            .expect("stderr was configured as a pipe");
-        let mut stdin = child.stdin.take().expect("stdin was configured as a pipe");
-        let (activity, activity_receiver) = watch::channel(Instant::now());
-        let stdout_sender = sender.clone();
-        let stdout_activity = activity.clone();
-        let mut stdout_task = tokio::spawn(async move {
-            read_stdout(BufReader::new(stdout), stdout_sender, stdout_activity).await
-        });
-        let mut stderr_task = tokio::spawn(async move {
-            let mut stderr = stderr;
-            let mut buffer = [0u8; 8192];
-            loop {
-                match stderr.read(&mut buffer).await {
-                    Ok(0) => return,
-                    Ok(_) => {
-                        let _ = activity.send(Instant::now());
-                    }
-                    Err(_) => return,
-                }
-            }
-        });
-        let mut stdin_task = tokio::spawn(async move {
-            let result = stdin.write_all(request.prompt.as_bytes()).await;
-            let _ = stdin.shutdown().await;
-            result
-        });
-        let started = Instant::now();
-        let mut watchdog = tokio::time::interval(Duration::from_secs(1));
-        let mut stdout_result = None;
-        let mut stdout_done = false;
-        let mut stdin_done = false;
-        let outcome = loop {
-            tokio::select! {
-                biased;
-                _ = control.cancel.cancelled() => break StreamPayload::Cancelled,
-                result = &mut stdout_task, if !stdout_done => {
-                    stdout_done = true;
-                    match result {
-                        Ok(Ok(session_id)) => stdout_result = Some(session_id),
-                        _ => break StreamPayload::failed("invalid_output", "OpenCode returned invalid or oversized stream output"),
-                    }
-                }
-                result = &mut stdin_task, if !stdin_done => {
-                    stdin_done = true;
-                    if !matches!(result, Ok(Ok(()))) {
-                        break StreamPayload::failed("stdin_closed", "OpenCode closed its input pipe before accepting the prompt");
-                    }
-                }
-                result = child.wait() => {
-                    match result {
-                        Ok(status) if status.success() => {
-                            if !stdout_done {
-                                let read_result = tokio::select! {
-                                    _ = control.cancel.cancelled() => break StreamPayload::Cancelled,
-                                    result = tokio::time::timeout(
-                                        self.limits.idle_timeout.min(self.limits.max_duration.saturating_sub(started.elapsed())),
-                                        &mut stdout_task,
-                                    ) => result,
-                                };
-                                stdout_done = read_result.is_ok();
-                                match read_result {
-                                    Ok(Ok(Ok(session_id))) => stdout_result = Some(session_id),
-                                    _ => break StreamPayload::failed("stdout_timeout", "OpenCode output did not close after process exit"),
-                                }
-                            }
-                            break StreamPayload::Completed { session_id: stdout_result.flatten() };
-                        }
-                        Ok(_) => break StreamPayload::failed("process_exit", "OpenCode exited unsuccessfully; review the API configuration before retrying"),
-                        Err(_) => break StreamPayload::failed("process_wait", "Unable to read the OpenCode process status"),
-                    }
-                }
-                _ = watchdog.tick() => {
-                    if started.elapsed() >= self.limits.max_duration {
-                        break StreamPayload::failed("duration_timeout", "The agent exceeded the maximum run duration");
-                    }
-                    if activity_receiver.borrow().elapsed() >= self.limits.idle_timeout {
-                        break StreamPayload::failed("idle_timeout", "OpenCode stopped producing output and was terminated");
-                    }
-                }
-            }
+        let session_id = match self
+            .resolve_session(&handle, request.session_id.as_deref(), &control.cancel)
+            .await
+        {
+            Ok(id) => id,
+            Err(failure) => return failure,
         };
-        // Kill the process group/job before joining pipes: descendants can otherwise hold them open.
-        drop(process_tree);
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-        abort_task(&mut stdout_task, stdout_done).await;
-        abort_task(&mut stderr_task, false).await;
-        abort_task(&mut stdin_task, stdin_done).await;
+        if let Some(active) = self.active.lock().await.get_mut(&request.request_id) {
+            active.session_id = Some(session_id.clone());
+        }
+        if control.cancel.is_cancelled() {
+            return StreamPayload::Cancelled;
+        }
+        let mut events = match self.open_events(&handle).await {
+            Ok(events) => events,
+            Err(failure) => return failure,
+        };
+        if let Err(failure) = self
+            .prompt_async(
+                &handle,
+                &session_id,
+                &request.prompt,
+                environment.model.as_deref(),
+                environment.reasoning_effort.as_deref(),
+            )
+            .await
+        {
+            return failure;
+        }
+        tracing::info!(request_id = %request.request_id, session_id = %session_id, "OpenCode prompt accepted");
+        let outcome = self
+            .read_events(&mut events, &handle, &session_id, &sender, &control)
+            .await;
+        if matches!(outcome, StreamPayload::Cancelled) {
+            self.abort_session(&handle, &session_id).await;
+        }
         outcome
     }
 
-    async fn spawn(
+    async fn start_server(
         &self,
-        request: &RunRequest,
         environment: &RunEnvironment,
-        sender: &mpsc::Sender<StreamPayload>,
-        control: &FlowControl,
-    ) -> Result<Child, StreamPayload> {
+        config: Vec<u8>,
+        cancellation: &CancellationToken,
+    ) -> Result<ServerProcess, StreamPayload> {
+        let mut last_error = StreamPayload::failed(
+            "spawn_failed",
+            "Unable to start the bundled OpenCode executable",
+        );
         for attempt in 0..2 {
-            if control.cancel.is_cancelled() {
+            if cancellation.is_cancelled() {
                 return Err(StreamPayload::Cancelled);
             }
+            let password = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
             let mut command = Command::new(&self.executable);
             command
-                .arg("run")
-                .args(["--format", "json"])
+                .args(["serve", "--hostname", "127.0.0.1", "--port", "0"])
                 .current_dir(&self.working_dir)
                 .env("OPENCODE_CONFIG", &environment.config_path)
                 .env("SUB2API_API_KEY", &environment.api_key)
+                .env("OPENCODE_SERVER_PASSWORD", &password)
                 .env(
                     "MOYU_HARNESS_INSTRUCTIONS_FILE",
                     environment
@@ -475,23 +553,19 @@ impl Engine {
                 )
                 .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
                 .env("OPENCODE_DISABLE_TERMINAL_TITLE", "true")
+                .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true")
                 .env("NO_COLOR", "1")
-                .stdin(Stdio::piped())
+                .env("FORCE_COLOR", "0")
+                .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            if let Some(session_id) = &request.session_id {
-                command.args(["--session", session_id]);
-            }
-            if let Some(model) = &environment.model {
-                command.args(["--model", model]);
-            }
             #[cfg(windows)]
-            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            command.creation_flags(0x08000000);
             #[cfg(unix)]
             command.process_group(0);
-            match command.spawn() {
-                Ok(child) => return Ok(child),
+            let mut child = match command.spawn() {
+                Ok(child) => child,
                 Err(error)
                     if attempt == 0
                         && matches!(
@@ -501,15 +575,11 @@ impl Engine {
                                 | io::ErrorKind::TimedOut
                         ) =>
                 {
-                    let _ = sender
-                        .send(StreamPayload::Status {
-                            message: "Retrying process startup".into(),
-                        })
-                        .await;
                     tokio::select! {
-                        _ = control.cancel.cancelled() => return Err(StreamPayload::Cancelled),
+                        _ = cancellation.cancelled() => return Err(StreamPayload::Cancelled),
                         _ = tokio::time::sleep(Duration::from_millis(300)) => {}
                     }
+                    continue;
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     return Err(StreamPayload::failed(
@@ -523,23 +593,828 @@ impl Engine {
                         "Unable to start the bundled OpenCode executable",
                     ))
                 }
+            };
+            let tree = match ProcessTree::attach(&child) {
+                Ok(tree) => tree,
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+                    return Err(StreamPayload::failed(
+                        "process_isolation",
+                        "Unable to isolate the agent process for safe cleanup",
+                    ));
+                }
+            };
+            let stdout = child.stdout.take().ok_or_else(|| {
+                StreamPayload::failed("spawn_failed", "OpenCode did not provide server output")
+            })?;
+            let stderr = child.stderr.take().ok_or_else(|| {
+                StreamPayload::failed("spawn_failed", "OpenCode did not provide server output")
+            })?;
+            let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let stderr_capture = stderr_tail.clone();
+            let stderr_task = tokio::spawn(async move {
+                drain_pipe(stderr, Some(stderr_capture)).await;
+            });
+            let mut stdout = BufReader::new(stdout);
+            let listen = self
+                .wait_for_listen(&mut child, &mut stdout, cancellation)
+                .await;
+            match listen {
+                Ok(url) => {
+                    if !self.wait_until_healthy(&url, &password, cancellation).await {
+                        stderr_task.abort();
+                        let _ = stderr_task.await;
+                        drop(tree);
+                        let _ = child.start_kill();
+                        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                        last_error = StreamPayload::failed(
+                            "spawn_failed",
+                            "OpenCode started but did not become healthy",
+                        );
+                        continue;
+                    }
+                    tracing::info!(%url, "OpenCode server listening");
+                    let stdout_task = tokio::spawn(async move {
+                        drain_pipe(stdout, None).await;
+                    });
+                    return Ok(ServerProcess {
+                        child,
+                        _tree: tree,
+                        url,
+                        password,
+                        fingerprint: ServerFingerprint {
+                            config,
+                            api_key: environment.api_key.clone(),
+                            working_dir: self.working_dir.clone(),
+                        },
+                        stdout_task,
+                        stderr_task,
+                    });
+                }
+                Err(failure) => {
+                    stderr_task.abort();
+                    let _ = stderr_task.await;
+                    drop(tree);
+                    let _ = child.start_kill();
+                    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                    let note = summarize_stderr(&stderr_tail.lock().await);
+                    last_error = attach_stderr(failure, &note);
+                    if matches!(last_error, StreamPayload::Cancelled) {
+                        return Err(last_error);
+                    }
+                    if attempt == 0 {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(StreamPayload::Cancelled),
+                            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+                        }
+                    }
+                }
             }
         }
-        Err(StreamPayload::failed(
-            "spawn_failed",
-            "Unable to start the bundled OpenCode executable",
-        ))
+        Err(last_error)
+    }
+
+    async fn wait_for_listen(
+        &self,
+        child: &mut Child,
+        stdout: &mut BufReader<impl tokio::io::AsyncRead + Unpin>,
+        cancellation: &CancellationToken,
+    ) -> Result<String, StreamPayload> {
+        let mut line = String::new();
+        let deadline = tokio::time::sleep(Duration::from_secs(15));
+        tokio::pin!(deadline);
+        loop {
+            line.clear();
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(StreamPayload::Cancelled),
+                _ = &mut deadline => {
+                    return Err(StreamPayload::failed(
+                        "spawn_failed",
+                        "OpenCode did not report a local listening address",
+                    ));
+                }
+                status = child.wait() => {
+                    let _ = status;
+                    return Err(StreamPayload::failed(
+                        "spawn_failed",
+                        "OpenCode exited before the local server was ready",
+                    ));
+                }
+                result = stdout.read_line(&mut line) => {
+                    match result {
+                        Ok(0) => {
+                            return Err(StreamPayload::failed(
+                                "spawn_failed",
+                                "OpenCode closed output before the local server was ready",
+                            ));
+                        }
+                        Ok(_) => {
+                            if let Some(url) = parse_listen_url(&line) {
+                                return Ok(url);
+                            }
+                        }
+                        Err(_) => {
+                            return Err(StreamPayload::failed(
+                                "spawn_failed",
+                                "Unable to read the OpenCode server address",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_until_healthy(
+        &self,
+        url: &str,
+        password: &str,
+        cancellation: &CancellationToken,
+    ) -> bool {
+        for _ in 0..20 {
+            if cancellation.is_cancelled() {
+                return false;
+            }
+            if self.probe_health(url, password).await {
+                return true;
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => return false,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        false
+    }
+
+    fn authed(
+        &self,
+        handle: &ServerHandle,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, format!("{}{path}", handle.url))
+            .basic_auth("opencode", Some(&handle.password))
+    }
+
+    fn authed_dir(
+        &self,
+        handle: &ServerHandle,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        self.authed(handle, method, path)
+            .query(&[("directory", self.working_dir.to_string_lossy().as_ref())])
+    }
+
+    async fn resolve_session(
+        &self,
+        handle: &ServerHandle,
+        requested: Option<&str>,
+        cancellation: &CancellationToken,
+    ) -> Result<String, StreamPayload> {
+        if cancellation.is_cancelled() {
+            return Err(StreamPayload::Cancelled);
+        }
+        if let Some(session_id) = requested {
+            match self
+                .authed_dir(
+                    handle,
+                    reqwest::Method::GET,
+                    &format!("/session/{session_id}"),
+                )
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => return Ok(session_id.to_owned()),
+                Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
+                Ok(_) => {
+                    return Err(StreamPayload::failed(
+                        "opencode_http",
+                        "OpenCode rejected the previous session; start a new conversation",
+                    ))
+                }
+                Err(_) => {
+                    return Err(StreamPayload::failed(
+                        "opencode_http",
+                        "Unable to reach the local OpenCode server",
+                    ))
+                }
+            }
+        }
+        self.create_session(handle).await
+    }
+
+    async fn create_session(&self, handle: &ServerHandle) -> Result<String, StreamPayload> {
+        let response = self
+            .authed_dir(handle, reqwest::Method::POST, "/session")
+            .timeout(Duration::from_secs(10))
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|_| {
+                StreamPayload::failed("opencode_http", "Unable to create an OpenCode session")
+            })?;
+        if !response.status().is_success() {
+            return Err(http_error(response).await);
+        }
+        let body = response.json::<Value>().await.map_err(|_| {
+            StreamPayload::failed("invalid_output", "OpenCode returned an invalid session")
+        })?;
+        body.get("id")
+            .and_then(Value::as_str)
+            .filter(|id| id.starts_with("ses_") && id.len() <= 128)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                StreamPayload::failed("invalid_output", "OpenCode returned an invalid session")
+            })
+    }
+
+    async fn open_events(&self, handle: &ServerHandle) -> Result<reqwest::Response, StreamPayload> {
+        let response = self
+            .authed_dir(handle, reqwest::Method::GET, "/event")
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .map_err(|_| {
+                StreamPayload::failed("opencode_http", "Unable to subscribe to OpenCode events")
+            })?;
+        if !response.status().is_success() {
+            return Err(http_error(response).await);
+        }
+        Ok(response)
+    }
+
+    async fn prompt_async(
+        &self,
+        handle: &ServerHandle,
+        session_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        variant: Option<&str>,
+    ) -> Result<(), StreamPayload> {
+        let mut body = json!({
+            "parts": [{ "type": "text", "text": prompt }]
+        });
+        let variant = variant.filter(|value| !value.is_empty());
+        if let Some(model) = model.filter(|value| !value.is_empty()) {
+            let (provider, model_id) = split_model(model);
+            let mut model_body = json!({ "providerID": provider, "modelID": model_id });
+            if let Some(variant) = variant {
+                model_body["variant"] = json!(variant);
+                body["variant"] = json!(variant);
+            }
+            body["model"] = model_body;
+        } else if let Some(variant) = variant {
+            body["variant"] = json!(variant);
+        }
+        let response = self
+            .authed_dir(
+                handle,
+                reqwest::Method::POST,
+                &format!("/session/{session_id}/prompt_async"),
+            )
+            .timeout(Duration::from_secs(15))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| {
+                StreamPayload::failed("opencode_http", "Unable to send the prompt to OpenCode")
+            })?;
+        if response.status().as_u16() == 204 || response.status().is_success() {
+            return Ok(());
+        }
+        Err(http_error(response).await)
+    }
+
+    async fn abort_session(&self, handle: &ServerHandle, session_id: &str) {
+        let _ = self
+            .authed_dir(
+                handle,
+                reqwest::Method::POST,
+                &format!("/session/{session_id}/abort"),
+            )
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+    }
+
+    async fn read_events(
+        &self,
+        events: &mut reqwest::Response,
+        handle: &ServerHandle,
+        session_id: &str,
+        sender: &mpsc::Sender<StreamPayload>,
+        control: &FlowControl,
+    ) -> StreamPayload {
+        let mut interpreter = SseInterpreter::new(session_id.to_owned());
+        let mut buffer = Vec::new();
+        let mut total = 0usize;
+        let started = Instant::now();
+        let mut last_activity = Instant::now();
+        let mut watchdog = tokio::time::interval(Duration::from_secs(1));
+        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = control.cancel.cancelled() => {
+                    self.abort_session(handle, session_id).await;
+                    return StreamPayload::Cancelled;
+                }
+                chunk = events.chunk() => {
+                    match chunk {
+                        Ok(Some(bytes)) => {
+                            total = match total.checked_add(bytes.len()) {
+                                Some(value) if value <= MAX_OUTPUT_BYTES => value,
+                                _ => return oversized_output(),
+                            };
+                            buffer.extend_from_slice(&bytes);
+                            last_activity = Instant::now();
+                            let parsed = match take_sse_events(&mut buffer) {
+                                Ok(parsed) => parsed,
+                                Err(failure) => return failure,
+                            };
+                            for event in parsed {
+                                match interpreter.apply(&event) {
+                                    EventOutcome::Ignore => {}
+                                    EventOutcome::Status(message) => {
+                                        if sender
+                                            .send(StreamPayload::Status { message })
+                                            .await
+                                            .is_err()
+                                        {
+                                            return disconnected();
+                                        }
+                                    }
+                                    EventOutcome::Chunk(text) => {
+                                        if let Err(failure) =
+                                            send_chunks(sender, text, Some(session_id.to_owned())).await
+                                        {
+                                            return failure;
+                                        }
+                                    }
+                                    EventOutcome::Completed => {
+                                        if let Err(failure) = flush_pending(
+                                            sender,
+                                            session_id,
+                                            interpreter.take_pending(),
+                                        )
+                                        .await
+                                        {
+                                            return failure;
+                                        }
+                                        return StreamPayload::Completed {
+                                            session_id: Some(session_id.to_owned()),
+                                        };
+                                    }
+                                    EventOutcome::Failed(failure) => {
+                                        if control.cancel.is_cancelled() {
+                                            return StreamPayload::Cancelled;
+                                        }
+                                        return failure;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            return StreamPayload::failed(
+                                "opencode_http",
+                                "OpenCode closed the event stream before the response finished",
+                            );
+                        }
+                        Err(_) => {
+                            if control.cancel.is_cancelled() {
+                                return StreamPayload::Cancelled;
+                            }
+                            return StreamPayload::failed(
+                                "opencode_http",
+                                "The OpenCode event stream was interrupted",
+                            );
+                        }
+                    }
+                }
+                _ = watchdog.tick() => {
+                    if started.elapsed() >= self.limits.max_duration {
+                        self.abort_session(handle, session_id).await;
+                        return StreamPayload::failed(
+                            "duration_timeout",
+                            "The agent exceeded the maximum run duration",
+                        );
+                    }
+                    if last_activity.elapsed() >= self.limits.idle_timeout {
+                        self.abort_session(handle, session_id).await;
+                        return StreamPayload::failed(
+                            "idle_timeout",
+                            "OpenCode stopped producing output and was terminated",
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
-async fn abort_task<T>(task: &mut JoinHandle<T>, already_joined: bool) {
-    if !already_joined {
-        task.abort();
-        let _ = task.await;
+async fn stop_server(mut server: ServerProcess) {
+    let _ = server.child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), server.child.wait()).await;
+}
+
+async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    tail: Option<Arc<Mutex<Vec<u8>>>>,
+) {
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(count) => {
+                if let Some(tail) = &tail {
+                    let mut log = tail.lock().await;
+                    log.extend_from_slice(&buffer[..count]);
+                    const KEEP: usize = 4096;
+                    if log.len() > KEEP * 2 {
+                        let extra = log.len() - KEEP;
+                        log.drain(..extra);
+                    }
+                }
+            }
+        }
     }
 }
 
-async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+fn payload_message(payload: StreamPayload) -> String {
+    match payload {
+        StreamPayload::Failed { message, .. } => message,
+        StreamPayload::Cancelled => "OpenCode startup was cancelled".into(),
+        _ => "Unable to start OpenCode".into(),
+    }
+}
+
+fn parse_listen_url(line: &str) -> Option<String> {
+    let line = line.trim();
+    let marker = "listening on ";
+    let index = line.find(marker)?;
+    let rest = line[index + marker.len()..].trim();
+    let url = rest.split_whitespace().next()?.trim_end_matches('/');
+    let port = url
+        .strip_prefix("http://127.0.0.1:")
+        .or_else(|| url.strip_prefix("http://localhost:"))?;
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("http://127.0.0.1:{port}"))
+}
+
+fn split_model(model: &str) -> (String, String) {
+    match model.split_once('/') {
+        Some((provider, id)) if !provider.is_empty() && !id.is_empty() => {
+            (provider.to_owned(), id.to_owned())
+        }
+        _ => ("sub2api".into(), model.to_owned()),
+    }
+}
+
+fn take_sse_events(buffer: &mut Vec<u8>) -> Result<Vec<Value>, StreamPayload> {
+    let mut events = Vec::new();
+    loop {
+        let Some((end, skip)) = find_sse_break(buffer) else {
+            if buffer.len() > MAX_LINE_BYTES {
+                return Err(oversized_output());
+            }
+            break;
+        };
+        let raw: Vec<u8> = buffer.drain(..end).collect();
+        let skip = skip.min(buffer.len());
+        buffer.drain(..skip);
+        if let Some(value) = parse_sse_block(&raw) {
+            events.push(value);
+        }
+    }
+    Ok(events)
+}
+
+fn find_sse_break(buffer: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0;
+    while index < buffer.len() {
+        if buffer[index] == b'\r'
+            && index + 3 < buffer.len()
+            && buffer[index + 1] == b'\n'
+            && buffer[index + 2] == b'\r'
+            && buffer[index + 3] == b'\n'
+        {
+            return Some((index, 4));
+        }
+        if buffer[index] == b'\n' && index + 1 < buffer.len() && buffer[index + 1] == b'\n' {
+            return Some((index, 2));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_sse_block(raw: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let mut data = String::new();
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        if let Some(payload) = line.strip_prefix("data:") {
+            let payload = payload.strip_prefix(' ').unwrap_or(payload);
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(payload);
+        }
+    }
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str(&data).ok()
+}
+
+#[derive(Debug)]
+enum EventOutcome {
+    Ignore,
+    Chunk(String),
+    Status(String),
+    Completed,
+    Failed(StreamPayload),
+}
+
+struct SseInterpreter {
+    session_id: String,
+    text_parts: HashSet<String>,
+    streamed_parts: HashSet<String>,
+    pending_text: HashMap<String, String>,
+    saw_working: bool,
+}
+
+impl SseInterpreter {
+    fn new(session_id: String) -> Self {
+        Self {
+            session_id,
+            text_parts: HashSet::new(),
+            streamed_parts: HashSet::new(),
+            pending_text: HashMap::new(),
+            saw_working: false,
+        }
+    }
+
+    fn take_pending(&mut self) -> Vec<String> {
+        let mut texts = Vec::new();
+        let streamed = &self.streamed_parts;
+        for (id, text) in self.pending_text.drain() {
+            if !streamed.contains(&id) && !text.is_empty() {
+                texts.push(text);
+            }
+        }
+        texts
+    }
+
+    fn apply(&mut self, event: &Value) -> EventOutcome {
+        let Some(kind) = event.get("type").and_then(Value::as_str) else {
+            return EventOutcome::Ignore;
+        };
+        let props = event.get("properties").unwrap_or(event);
+        if let Some(session_id) = event_session_id(props) {
+            if session_id != self.session_id {
+                return EventOutcome::Ignore;
+            }
+        } else if kind != "session.error" {
+            return EventOutcome::Ignore;
+        }
+        match kind {
+            "message.part.delta" => {
+                if props.get("field").and_then(Value::as_str) != Some("text") {
+                    return EventOutcome::Ignore;
+                }
+                let Some(id) = props.get("partID").and_then(Value::as_str) else {
+                    return EventOutcome::Ignore;
+                };
+                if id.len() > 128 {
+                    return EventOutcome::Failed(oversized_output());
+                }
+                if !self.text_parts.is_empty() && !self.text_parts.contains(id) {
+                    return EventOutcome::Ignore;
+                }
+                let Some(delta) = props.get("delta").and_then(Value::as_str) else {
+                    return EventOutcome::Ignore;
+                };
+                if delta.is_empty() {
+                    return EventOutcome::Ignore;
+                }
+                if self.streamed_parts.len() + self.text_parts.len() >= MAX_PARTS {
+                    return EventOutcome::Failed(oversized_output());
+                }
+                self.streamed_parts.insert(id.to_owned());
+                EventOutcome::Chunk(delta.to_owned())
+            }
+            "message.part.updated" => {
+                let Some(part) = props.get("part") else {
+                    return EventOutcome::Ignore;
+                };
+                if part.get("type").and_then(Value::as_str) != Some("text") {
+                    return EventOutcome::Ignore;
+                }
+                let Some(id) = part.get("id").and_then(Value::as_str) else {
+                    return EventOutcome::Ignore;
+                };
+                if id.len() > 128 {
+                    return EventOutcome::Failed(oversized_output());
+                }
+                self.text_parts.insert(id.to_owned());
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    if !self.streamed_parts.contains(id) {
+                        self.pending_text.insert(id.to_owned(), text.to_owned());
+                    }
+                }
+                EventOutcome::Ignore
+            }
+            "session.idle" => EventOutcome::Completed,
+            "session.error" => {
+                let error = props.get("error").cloned().unwrap_or(Value::Null);
+                EventOutcome::Failed(StreamPayload::failed(
+                    "opencode_error",
+                    &opencode_error_message(&json!({ "error": error })),
+                ))
+            }
+            "session.status" => {
+                let status = props.get("status").unwrap_or(&Value::Null);
+                let kind = status
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .or_else(|| status.as_str());
+                if kind == Some("idle") || self.saw_working {
+                    return EventOutcome::Ignore;
+                }
+                self.saw_working = true;
+                EventOutcome::Status("Agent is working".into())
+            }
+            _ => EventOutcome::Ignore,
+        }
+    }
+}
+
+fn event_session_id(properties: &Value) -> Option<&str> {
+    properties
+        .get("sessionID")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            properties
+                .pointer("/part/sessionID")
+                .and_then(Value::as_str)
+        })
+}
+
+async fn send_chunks(
+    sender: &mpsc::Sender<StreamPayload>,
+    text: String,
+    session_id: Option<String>,
+) -> Result<(), StreamPayload> {
+    let mut remaining = text.as_str();
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(MAX_CHUNK_BYTES);
+        while end > 0 && !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            break;
+        }
+        sender
+            .send(StreamPayload::Chunk {
+                text: remaining[..end].to_owned(),
+                session_id: session_id.clone(),
+            })
+            .await
+            .map_err(|_| disconnected())?;
+        remaining = &remaining[end..];
+    }
+    Ok(())
+}
+
+async fn flush_pending(
+    sender: &mpsc::Sender<StreamPayload>,
+    session_id: &str,
+    pending: Vec<String>,
+) -> Result<(), StreamPayload> {
+    for text in pending {
+        send_chunks(sender, text, Some(session_id.to_owned())).await?;
+    }
+    Ok(())
+}
+
+async fn http_error(response: reqwest::Response) -> StreamPayload {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let value = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    let message = opencode_error_message(&value);
+    let message = if message == "OpenCode reported an error" {
+        let snippet: String = body.chars().filter(|c| *c != '\n').take(200).collect();
+        if snippet.is_empty() {
+            format!("OpenCode HTTP {status}")
+        } else {
+            format!("OpenCode HTTP {status}: {snippet}")
+        }
+    } else {
+        message
+    };
+    StreamPayload::failed("opencode_http", &message)
+}
+
+fn summarize_stderr(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.contains("NO_COLOR")
+                && !line.contains("FORCE_COLOR")
+                && !line.contains("warnOnDeactivatedColors")
+        })
+        .last()
+        .unwrap_or("")
+        .chars()
+        .take(300)
+        .collect()
+}
+
+fn attach_stderr(outcome: StreamPayload, stderr: &str) -> StreamPayload {
+    if stderr.is_empty() {
+        return outcome;
+    }
+    match outcome {
+        StreamPayload::Failed {
+            code,
+            message,
+            retryable,
+        } if matches!(
+            code.as_str(),
+            "process_exit" | "invalid_output" | "spawn_failed"
+        ) && !message.contains(stderr) =>
+        {
+            StreamPayload::Failed {
+                code,
+                message: format!("{message}: {stderr}"),
+                retryable,
+            }
+        }
+        other => other,
+    }
+}
+
+fn opencode_error_message(value: &Value) -> String {
+    let error = value.get("error").unwrap_or(value);
+    let text = error
+        .pointer("/data/message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .or_else(|| {
+            error
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or("OpenCode reported an error");
+    let mut text: String = text.chars().take(400).collect();
+    if text.contains('\n') {
+        text = text.replace('\n', " ");
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("certificate verification")
+        || lower.contains("unable to verify")
+        || lower.contains("self signed certificate")
+        || lower.contains("tls handshake")
+    {
+        return format!(
+            "The selected API line failed TLS verification ({text}). Switch to the backup line in Settings and retry."
+        );
+    }
+    text
+}
+
+fn oversized_output() -> StreamPayload {
+    StreamPayload::failed(
+        "invalid_output",
+        "OpenCode returned invalid or oversized stream output",
+    )
+}
+
+#[cfg(test)]
+async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     line: &mut Vec<u8>,
 ) -> io::Result<bool> {
@@ -569,6 +1444,7 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct OutputParser {
     session_id: Option<String>,
@@ -577,13 +1453,18 @@ struct OutputParser {
     completed_parts: HashSet<String>,
 }
 
+#[cfg(test)]
 impl OutputParser {
     fn parse(&mut self, line: &[u8]) -> Result<Option<StreamPayload>, ()> {
         if line.iter().all(|b| b.is_ascii_whitespace()) {
             return Ok(None);
         }
-        let value: Value = serde_json::from_slice(line).map_err(|_| ())?;
-        let kind = value.get("type").and_then(Value::as_str).ok_or(())?;
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            return Ok(None);
+        };
+        let Some(kind) = value.get("type").and_then(Value::as_str) else {
+            return Ok(None);
+        };
         if let Some(id) = value.get("sessionID").and_then(Value::as_str) {
             if id.len() > 128 {
                 return Err(());
@@ -602,11 +1483,15 @@ impl OutputParser {
         }
         match kind {
             "text_delta" => {
-                let id = value.get("partID").and_then(Value::as_str).ok_or(())?;
+                let Some(id) = value.get("partID").and_then(Value::as_str) else {
+                    return Ok(None);
+                };
                 if id.len() > 128 {
                     return Err(());
                 }
-                let text = value.get("text").and_then(Value::as_str).ok_or(())?;
+                let Some(text) = value.get("text").and_then(Value::as_str) else {
+                    return Ok(None);
+                };
                 if self.completed_parts.contains(id) {
                     return Ok(None);
                 }
@@ -617,12 +1502,18 @@ impl OutputParser {
                 }))
             }
             "text" => {
-                let part = value.get("part").ok_or(())?;
-                let id = part.get("id").and_then(Value::as_str).ok_or(())?;
+                let Some(part) = value.get("part") else {
+                    return Ok(None);
+                };
+                let Some(id) = part.get("id").and_then(Value::as_str) else {
+                    return Ok(None);
+                };
                 if id.len() > 128 {
                     return Err(());
                 }
-                let text = part.get("text").and_then(Value::as_str).ok_or(())?;
+                let Some(text) = part.get("text").and_then(Value::as_str) else {
+                    return Ok(None);
+                };
                 if !self.completed_parts.insert(id.to_owned()) || self.streamed_parts.contains(id) {
                     return Ok(None);
                 }
@@ -638,7 +1529,10 @@ impl OutputParser {
             "tool_use" => Ok(Some(StreamPayload::Status {
                 message: "Agent tool finished".into(),
             })),
-            "error" => Err(()),
+            "error" => Ok(Some(StreamPayload::failed(
+                "opencode_error",
+                &opencode_error_message(&value),
+            ))),
             "bridge_ready" => {
                 self.bridge_ready = true;
                 Ok(Some(StreamPayload::Status {
@@ -650,49 +1544,64 @@ impl OutputParser {
     }
 }
 
-async fn read_stdout<R: AsyncBufRead + Unpin>(
+fn disconnected() -> StreamPayload {
+    StreamPayload::failed(
+        "channel_disconnected",
+        "The application channel disconnected",
+    )
+}
+
+#[cfg(test)]
+async fn read_stdout<R: tokio::io::AsyncBufRead + Unpin>(
     mut reader: R,
     sender: mpsc::Sender<StreamPayload>,
-    activity: watch::Sender<Instant>,
-) -> Result<Option<String>, ()> {
+    activity: tokio::sync::watch::Sender<Instant>,
+) -> Result<Option<String>, StreamPayload> {
     let mut line = Vec::with_capacity(8192);
     let mut total = 0usize;
     let mut parser = OutputParser::default();
     while read_bounded_line(&mut reader, &mut line)
         .await
-        .map_err(|_| ())?
+        .map_err(|_| oversized_output())?
     {
-        total = total.checked_add(line.len()).ok_or(())?;
+        total = total.checked_add(line.len()).ok_or_else(oversized_output)?;
         if total > MAX_OUTPUT_BYTES {
-            return Err(());
+            return Err(oversized_output());
         }
         tracing::debug!(bytes = line.len(), "Received OpenCode JSONL output");
         let _ = activity.send(Instant::now());
-        if let Some(payload) = parser.parse(&line)? {
-            match payload {
-                StreamPayload::Chunk { text, session_id } => {
-                    let mut remaining = text.as_str();
-                    while !remaining.is_empty() {
-                        let mut end = remaining.len().min(MAX_CHUNK_BYTES);
-                        while !remaining.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        sender
-                            .send(StreamPayload::Chunk {
-                                text: remaining[..end].to_owned(),
-                                session_id: session_id.clone(),
-                            })
-                            .await
-                            .map_err(|_| ())?;
-                        remaining = &remaining[end..];
+        let Some(payload) = parser.parse(&line).map_err(|_| oversized_output())? else {
+            continue;
+        };
+        if matches!(payload, StreamPayload::Failed { .. }) {
+            return Err(payload);
+        }
+        match payload {
+            StreamPayload::Chunk { text, session_id } => {
+                let mut remaining = text.as_str();
+                while !remaining.is_empty() {
+                    let mut end = remaining.len().min(MAX_CHUNK_BYTES);
+                    while !remaining.is_char_boundary(end) {
+                        end -= 1;
                     }
+                    sender
+                        .send(StreamPayload::Chunk {
+                            text: remaining[..end].to_owned(),
+                            session_id: session_id.clone(),
+                        })
+                        .await
+                        .map_err(|_| disconnected())?;
+                    remaining = &remaining[end..];
                 }
-                payload => sender.send(payload).await.map_err(|_| ())?,
             }
+            payload => sender.send(payload).await.map_err(|_| disconnected())?,
         }
     }
-    if !parser.bridge_ready || parser.session_id.is_none() {
-        return Err(());
+    if parser.session_id.is_none() {
+        return Err(StreamPayload::failed(
+            "invalid_output",
+            "OpenCode produced no usable stream output",
+        ));
     }
     Ok(parser.session_id)
 }
@@ -784,10 +1693,31 @@ impl Drop for ProcessTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::watch;
+
+    #[test]
+    fn admit_request_allows_parallel_sessions_and_rejects_the_same_one() {
+        assert!(admit_request(0, std::iter::empty(), None).is_ok());
+        assert!(admit_request(1, [None].into_iter(), None).is_ok());
+        assert!(admit_request(1, ["ses_a"].into_iter().map(Some), Some("ses_b")).is_ok());
+        assert_eq!(
+            admit_request(1, ["ses_a"].into_iter().map(Some), Some("ses_a")).unwrap_err(),
+            "This conversation is already running"
+        );
+        assert_eq!(
+            admit_request(MAX_PARALLEL_REQUESTS, std::iter::empty(), None).unwrap_err(),
+            "Too many agent requests are already running"
+        );
+    }
 
     #[test]
     fn parses_delta_and_does_not_duplicate_completed_part() {
         let mut parser = OutputParser::default();
+        assert!(matches!(
+            parser.parse(br#"{"type":"bridge_ready"}"#),
+            Ok(Some(StreamPayload::Status { .. }))
+        ));
+        assert!(parser.bridge_ready);
         assert!(matches!(
             parser.parse(
                 br#"{"type":"text_delta","sessionID":"ses_1","partID":"prt_1","text":"hello"}"#
@@ -810,10 +1740,57 @@ mod tests {
             ),
             Ok(Some(StreamPayload::Chunk { .. }))
         ));
-        assert!(parser
+        match parser
             .parse(br#"{"type":"error","error":{"message":"secret"}}"#)
-            .is_err());
-        assert!(parser.parse(b"not json").is_err());
+            .unwrap()
+            .unwrap()
+        {
+            StreamPayload::Failed { code, message, .. } => {
+                assert_eq!(code, "opencode_error");
+                assert!(message.contains("secret"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parser.parse(b"not json").unwrap().is_none());
+        assert!(parser.parse(br#"{"foo":1}"#).unwrap().is_none());
+    }
+
+    #[test]
+    fn opencode_error_events_surface_the_provider_message() {
+        let mut parser = OutputParser::default();
+        match parser
+            .parse(
+                br#"{"type":"error","sessionID":"ses_1","error":{"name":"ProviderError","data":{"message":"model not found"}}}"#,
+            )
+            .unwrap()
+            .unwrap()
+        {
+            StreamPayload::Failed { code, message, .. } => {
+                assert_eq!(code, "opencode_error");
+                assert!(message.contains("model not found"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn certificate_errors_tell_the_user_to_switch_lines() {
+        let mut parser = OutputParser::default();
+        match parser
+            .parse(
+                br#"{"type":"error","error":{"data":{"message":"unknown certificate verification error"}}}"#,
+            )
+            .unwrap()
+            .unwrap()
+        {
+            StreamPayload::Failed { code, message, .. } => {
+                assert_eq!(code, "opencode_error");
+                assert!(message.contains("TLS verification"));
+                assert!(message.contains("backup line"));
+                assert!(message.contains("unknown certificate verification error"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -890,12 +1867,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eof_without_a_bridge_and_session_is_a_failure() {
-        for input in [
-            "",
-            "{\"type\":\"bridge_ready\"}\n",
-            "{\"type\":\"step_start\",\"sessionID\":\"ses_1\"}\n",
-        ] {
+    async fn eof_without_a_session_is_a_failure() {
+        for input in ["", "{\"type\":\"bridge_ready\"}\n"] {
             let (sender, _receiver) = mpsc::channel(BUFFER_CAPACITY);
             let (activity, _) = watch::channel(Instant::now());
             assert!(
@@ -906,11 +1879,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn native_json_without_bridge_still_completes() {
+        let input = concat!(
+            "{\"type\":\"step_start\",\"sessionID\":\"ses_1\"}\n",
+            "{\"type\":\"text\",\"sessionID\":\"ses_1\",\"part\":{\"id\":\"prt_1\",\"text\":\"hi\"}}\n",
+        );
+        let (sender, mut receiver) = mpsc::channel(BUFFER_CAPACITY);
+        let (activity, _) = watch::channel(Instant::now());
+        let session = read_stdout(BufReader::new(input.as_bytes()), sender, activity)
+            .await
+            .unwrap();
+        assert_eq!(session.as_deref(), Some("ses_1"));
+        let mut texts = Vec::new();
+        while let Some(payload) = receiver.recv().await {
+            if let StreamPayload::Chunk { text, .. } = payload {
+                texts.push(text);
+            }
+        }
+        assert_eq!(texts, ["hi"]);
+    }
+
+    #[tokio::test]
+    async fn opencode_error_line_stops_the_reader() {
+        let input = concat!(
+            "{\"type\":\"bridge_ready\"}\n",
+            "{\"type\":\"error\",\"sessionID\":\"ses_1\",\"error\":{\"data\":{\"message\":\"quota exceeded\"}}}\n",
+        );
+        let (sender, _receiver) = mpsc::channel(BUFFER_CAPACITY);
+        let (activity, _) = watch::channel(Instant::now());
+        match read_stdout(BufReader::new(input.as_bytes()), sender, activity)
+            .await
+            .unwrap_err()
+        {
+            StreamPayload::Failed { code, message, .. } => {
+                assert_eq!(code, "opencode_error");
+                assert!(message.contains("quota exceeded"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn test_environment(directory: &std::path::Path) -> RunEnvironment {
         RunEnvironment {
             config_path: directory.join("opencode.json"),
             api_key: "fixture-only".into(),
             model: None,
+            reasoning_effort: None,
         }
     }
 
@@ -961,8 +1976,104 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(collected.last().unwrap()["code"], "preflight_failed");
+        assert_eq!(collected.last().unwrap()["code"], "sidecar_missing");
         assert!(engine.active.lock().await.is_empty());
+    }
+
+    #[test]
+    fn listen_url_must_be_loopback() {
+        assert_eq!(
+            parse_listen_url("opencode server listening on http://127.0.0.1:18780"),
+            Some("http://127.0.0.1:18780".into())
+        );
+        assert_eq!(
+            parse_listen_url("listening on http://localhost:9"),
+            Some("http://127.0.0.1:9".into())
+        );
+        assert!(parse_listen_url("listening on http://0.0.0.0:18780").is_none());
+        assert!(parse_listen_url("listening on http://127.0.0.1:abc").is_none());
+    }
+
+    #[test]
+    fn sse_parser_extracts_json_data_and_ignores_comments() {
+        let mut buffer =
+            b": ping\n\ndata: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_1\"}}\n\npartial"
+                .to_vec();
+        let events = take_sse_events(&mut buffer).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "session.idle");
+        assert_eq!(buffer, b"partial");
+    }
+
+    #[test]
+    fn sse_interpreter_streams_text_and_completes_on_idle() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "part": { "id": "prt_1", "type": "text", "text": "" },
+                    "time": 1
+                }
+            })),
+            EventOutcome::Ignore
+        ));
+        match interpreter.apply(&json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses_1",
+                "messageID": "msg_1",
+                "partID": "prt_1",
+                "field": "text",
+                "delta": "hello"
+            }
+        })) {
+            EventOutcome::Chunk(text) => assert_eq!(text, "hello"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "ses_other",
+                    "messageID": "msg_1",
+                    "partID": "prt_2",
+                    "field": "text",
+                    "delta": "hidden"
+                }
+            })),
+            EventOutcome::Ignore
+        ));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            })),
+            EventOutcome::Completed
+        ));
+        assert!(interpreter.take_pending().is_empty());
+    }
+
+    #[test]
+    fn sse_interpreter_emits_completed_text_when_deltas_are_missing() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": { "id": "prt_1", "type": "text", "text": "hello" },
+                "time": 1
+            }
+        }));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            })),
+            EventOutcome::Completed
+        ));
+        assert_eq!(interpreter.take_pending(), ["hello"]);
     }
 
     #[tokio::test]
@@ -991,12 +2102,14 @@ mod tests {
         while let Some(event) = events.recv().await {
             collected.push(event);
         }
-        assert_eq!(
-            collected
-                .iter()
-                .filter(|event| event["kind"] == "cancelled")
-                .count(),
-            1
+        let terminals = collected
+            .iter()
+            .filter(|event| event["kind"] == "cancelled" || event["kind"] == "failed")
+            .count();
+        assert_eq!(terminals, 1);
+        assert!(
+            collected.last().unwrap()["kind"] == "cancelled"
+                || collected.last().unwrap()["kind"] == "failed"
         );
         assert!(engine.active.lock().await.is_empty());
     }
