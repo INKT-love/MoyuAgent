@@ -815,11 +815,18 @@ impl Engine {
             .json(&json!({}))
             .send()
             .await
-            .map_err(|_| {
-                StreamPayload::failed("opencode_http", "Unable to create an OpenCode session")
+            .map_err(|error| {
+                StreamPayload::failed(
+                    "opencode_http",
+                    &format!("Unable to create an OpenCode session: {error}"),
+                )
             })?;
         if !response.status().is_success() {
-            return Err(http_error(response).await);
+            return Err(prefix_http_error(
+                "Unable to create an OpenCode session",
+                response,
+            )
+            .await);
         }
         let body = response.json::<Value>().await.map_err(|_| {
             StreamPayload::failed("invalid_output", "OpenCode returned an invalid session")
@@ -839,8 +846,11 @@ impl Engine {
             .header("Accept", "text/event-stream")
             .send()
             .await
-            .map_err(|_| {
-                StreamPayload::failed("opencode_http", "Unable to subscribe to OpenCode events")
+            .map_err(|error| {
+                StreamPayload::failed(
+                    "opencode_http",
+                    &format!("Unable to subscribe to OpenCode events: {error}"),
+                )
             })?;
         if !response.status().is_success() {
             return Err(http_error(response).await);
@@ -881,8 +891,11 @@ impl Engine {
             .json(&body)
             .send()
             .await
-            .map_err(|_| {
-                StreamPayload::failed("opencode_http", "Unable to send the prompt to OpenCode")
+            .map_err(|error| {
+                StreamPayload::failed(
+                    "opencode_http",
+                    &format!("Unable to send the prompt to OpenCode: {error}"),
+                )
             })?;
         if response.status().as_u16() == 204 || response.status().is_success() {
             return Ok(());
@@ -1393,21 +1406,25 @@ async fn flush_pending(
 }
 
 async fn http_error(response: reqwest::Response) -> StreamPayload {
+    prefix_http_error("OpenCode request failed", response).await
+}
+
+async fn prefix_http_error(prefix: &str, response: reqwest::Response) -> StreamPayload {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     let value = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
     let message = opencode_error_message(&value);
-    let message = if message == "OpenCode reported an error" {
+    let detail = if message == "OpenCode reported an error" {
         let snippet: String = body.chars().filter(|c| *c != '\n').take(200).collect();
         if snippet.is_empty() {
-            format!("OpenCode HTTP {status}")
+            format!("HTTP {status}")
         } else {
-            format!("OpenCode HTTP {status}: {snippet}")
+            format!("HTTP {status}: {snippet}")
         }
     } else {
         message
     };
-    StreamPayload::failed("opencode_http", &message)
+    StreamPayload::failed("opencode_http", &format!("{prefix}: {detail}"))
 }
 
 fn summarize_stderr(bytes: &[u8]) -> String {

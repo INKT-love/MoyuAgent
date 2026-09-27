@@ -100,6 +100,12 @@ try {
         if (command === "logout") { state.authenticated = false; state.user = null; return; }
         if (command === "start_stream") {
           testState.streamRequests = [...testState.streamRequests, { requestId: args.requestId, prompt: args.prompt, sessionId: args.sessionId, workspace: args.workspace }];
+          if (args.prompt === "Session failure") {
+            const callback = callbacks.get(args.onEvent.id);
+            callback({ index: 0, message: { requestId: args.requestId, sequence: 1, kind: "failed", code: "opencode_http", message: "Unable to create an OpenCode session: HTTP 500: boom", retryable: true } });
+            callback({ end: true, index: 1 });
+            return;
+          }
           const callback = callbacks.get(args.onEvent.id); let sequence = 0; let index = 0;
           const emit = payload => callback({ index: index++, message: { requestId: args.requestId, sequence: ++sequence, ...payload } });
           const end = kind => {
@@ -139,6 +145,12 @@ try {
   await page.getByText("先前的回复").waitFor();
   assert.ok(await page.locator("iframe[title='贪吃蛇']").isVisible(), "ui.main mixin must mount");
   assert.equal((await page.locator(".mixin-slot").innerText()).trim(), "Mixin");
+  await prompt.fill("Session failure");
+  await page.getByRole("button", { name: "发送任务" }).click();
+  await page.getByText("无法创建本地会话。", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "显示原始报错" }).click();
+  await page.locator(".error-original").getByText("Unable to create an OpenCode session: HTTP 500: boom").waitFor();
+  await page.screenshot({ path: "artifacts/error-original-desktop.png" });
   await prompt.fill("Stream verification");
   await page.getByRole("button", { name: "发送任务" }).click();
   await page.getByText(/chunk 1 /).first().waitFor();

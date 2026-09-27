@@ -9,6 +9,7 @@ import {
 import { Check, ChevronLeft, LoaderCircle } from "lucide-solid";
 import type { Group, GroupModel } from "../lib/api";
 import { command, errorMessage, pickModel } from "../lib/api";
+import { localizeError } from "../lib/errors";
 
 export function ModelPicker(props: {
   groups: Group[];
@@ -166,7 +167,7 @@ export function ModelPicker(props: {
             </p>
           </Show>
           <Show when={!loading() && error()}>
-            <p class="model-picker-error">{error()}</p>
+            <p class="model-picker-error">{localizeError(error()).message}</p>
           </Show>
           <Show when={!loading() && !error() && !visibleModels().length}>
             <p class="model-picker-empty">暂无可用模型</p>

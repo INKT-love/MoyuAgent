@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { errorRaw } from "./errors";
 
 export interface Endpoint {
   index: number;
@@ -114,11 +115,7 @@ export function command<T>(
 }
 
 export function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object" && "message" in error)
-    return String(error.message);
-  return "操作失败，请稍后重试。";
+  return errorRaw(error) || "操作失败，请稍后重试。";
 }
 
 export function defaultModel(group?: Group): string {

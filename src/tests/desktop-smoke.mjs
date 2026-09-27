@@ -224,6 +224,21 @@ try {
               sessionId: payload.sessionId,
               workspace: payload.workspace,
             });
+            if (payload.prompt === "会话失败") {
+              callbacks.get(payload.onEvent.id)?.({
+                index: 0,
+                message: {
+                  requestId: payload.requestId,
+                  sequence: 1,
+                  kind: "failed",
+                  code: "opencode_http",
+                  message: "Unable to create an OpenCode session",
+                  retryable: true,
+                },
+              });
+              callbacks.get(payload.onEvent.id)?.({ index: 1, end: true });
+              return;
+            }
             let index = 0;
             let done = false;
             const emit = (event) =>
@@ -318,6 +333,15 @@ try {
     page.getByText("https://inkaicf.flymiku.top", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "对话", exact: true }).click();
+  await page.getByLabel("任务内容").fill("会话失败");
+  await page.getByRole("button", { name: "发送任务" }).click();
+  await expect(page.getByText("无法创建本地会话。")).toBeVisible();
+  await page.getByRole("button", { name: "显示原始报错" }).click();
+  await expect(page.locator(".error-original")).toContainText(
+    "Unable to create an OpenCode session",
+  );
+  await page.locator(".new-chat-button").click();
+  await expect(page.locator(".topbar-title strong")).toHaveText("新任务");
   await page.getByLabel("任务内容").fill("检查项目配置");
   await page.getByRole("button", { name: "发送任务" }).click();
   await expect(page.locator(".message-content").last()).toContainText(

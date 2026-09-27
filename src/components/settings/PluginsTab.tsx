@@ -1,6 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import { Puzzle, Plus, Trash2 } from "lucide-solid";
 import type { PluginInfo } from "../../lib/api";
+import { ErrorNotice } from "../ErrorNotice";
 import { command, desktop, errorMessage } from "../../lib/api";
 
 export function PluginsTab(props: {
@@ -59,9 +60,7 @@ export function PluginsTab(props: {
         启用「WASM探针」后，设置里会多一页，输入栏会出现标记。
       </p>
       <Show when={error()}>
-        <div role="alert" class="notice error-notice">
-          {error()}
-        </div>
+        <ErrorNotice error={error()} class="notice error-notice" />
       </Show>
       <Show
         when={plugins().length}

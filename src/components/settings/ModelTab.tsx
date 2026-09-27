@@ -9,6 +9,7 @@ import {
 import { ChevronDown, KeyRound, RefreshCw } from "lucide-solid";
 import type { AppState, ConfigSummary, Group, GroupModel } from "../../lib/api";
 import { command, errorMessage, pickModel } from "../../lib/api";
+import { ErrorNotice } from "../ErrorNotice";
 import { SaveBar } from "./SaveBar";
 
 export function ModelTab(props: {
@@ -266,9 +267,7 @@ export function ModelTab(props: {
         </div>
       </section>
       <Show when={error()}>
-        <div role="alert" class="notice error-notice">
-          {error()}
-        </div>
+        <ErrorNotice error={error()} class="notice error-notice" />
       </Show>
       <SaveBar
         saving={saving()}

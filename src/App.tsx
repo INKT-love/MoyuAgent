@@ -39,8 +39,8 @@ import {
   Terminal,
   X,
   LoaderCircle,
-  AlertCircle,
 } from "lucide-solid";
+import { ErrorNotice } from "./components/ErrorNotice";
 import { ModelPicker } from "./components/ModelPicker";
 import { PermissionPicker } from "./components/PermissionPicker";
 import { ReasoningPicker } from "./components/ReasoningPicker";
@@ -61,6 +61,7 @@ import {
   permissionChipLabel,
 } from "./lib/permissions";
 import { workspaceKey, workspaceLabel } from "./lib/workspaces";
+import { localizeError } from "./lib/errors";
 import {
   command,
   defaultModel,
@@ -197,9 +198,10 @@ export default function App() {
     streamingIds().includes(conversation().id),
   );
   const runningCount = createMemo(() => streamingIds().length);
-  const streamStatus = createMemo(
-    () => streamStatuses()[conversation().id] ?? "",
-  );
+  const streamStatus = createMemo(() => {
+    const raw = streamStatuses()[conversation().id] ?? "";
+    return raw ? localizeError(raw).message : "";
+  });
   const workspaceRunning = (path: string) =>
     conversations().some(
       (item) =>
@@ -1673,8 +1675,7 @@ export default function App() {
         </header>
         <Show when={error()}>
           <div class="global-error" role="alert">
-            <AlertCircle size={17} />
-            <span>{error()}</span>
+            <ErrorNotice error={error()} class="error-notice" />
             <button
               class="icon-button"
               title="关闭提示"
@@ -1946,10 +1947,7 @@ export default function App() {
                                   </div>
                                 </Show>
                                 <Show when={message.error}>
-                                  <div class="message-error" role="alert">
-                                    <AlertCircle size={15} />
-                                    {message.error}
-                                  </div>
+                                  <ErrorNotice error={message.error} />
                                 </Show>
                                 <Show when={message.state === "cancelled"}>
                                   <div class="message-cancelled">已停止</div>

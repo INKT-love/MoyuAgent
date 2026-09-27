@@ -167,13 +167,13 @@ impl Services {
             .auth
             .current_user()
             .await?
-            .ok_or_else(|| format!("Sign in before {action}"))?;
+            .ok_or_else(|| format!("请先登录后再{action}"))?;
         *self.user.lock().await = Some(user.clone());
         Ok(user)
     }
 
     async fn catalog_groups(&self, app: &AppHandle, refresh: bool) -> Result<Vec<Group>, String> {
-        let user = self.require_user("listing groups").await?;
+        let user = self.require_user("查看分组").await?;
         if !refresh {
             let cached = self
                 .preferences
@@ -198,7 +198,7 @@ impl Services {
         group_id: i64,
         refresh: bool,
     ) -> Result<Vec<GroupModel>, String> {
-        let user = self.require_user("listing models").await?;
+        let user = self.require_user("查看模型").await?;
         if group_id <= 0 {
             return Err("The selected group is not available for this account".into());
         }
@@ -423,12 +423,7 @@ async fn configure(
 ) -> Result<ConfigSummary, String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    let user = services
-        .auth
-        .current_user()
-        .await?
-        .ok_or("Sign in before configuring OpenCode")?;
-    *services.user.lock().await = Some(user.clone());
+    let user = services.require_user("配置模型").await?;
     let mut groups = services.catalog_groups(&app, false).await?;
     if let Some(id) = group_id {
         if !groups.iter().any(|group| group.id == id) {
@@ -805,12 +800,7 @@ async fn start_stream(
 ) -> Result<(), String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    let user = services
-        .user
-        .lock()
-        .await
-        .clone()
-        .ok_or("Sign in before starting the agent")?;
+    let user = services.require_user("开始任务").await?;
     let mut summary = services
         .preferences
         .lock()
@@ -869,7 +859,7 @@ async fn list_conversations(
 ) -> Result<HistorySnapshot, String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    let user = services.require_user("listing conversations").await?;
+    let user = services.require_user("查看对话").await?;
     history::load(&app, user.id).await
 }
 
@@ -881,7 +871,7 @@ async fn save_conversations(
 ) -> Result<(), String> {
     let services = state.services(&app).await?;
     let _guard = services.mutation.lock().await;
-    let user = services.require_user("saving conversations").await?;
+    let user = services.require_user("保存对话").await?;
     history::save(&app, user.id, history).await
 }
 

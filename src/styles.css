@@ -699,15 +699,21 @@ button.workspace-status:hover:enabled {
   background: #fff5ef;
   border-bottom: 1px solid #f0ded4;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 9px;
   padding: 11px 28px;
   color: #9b5b42;
   font-size: 12px;
 }
-.global-error > span {
+.global-error .error-notice {
   flex: 1;
-  overflow-wrap: anywhere;
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.global-error > .icon-button {
+  margin-top: 1px;
+  flex: none;
 }
 .preview-banner {
   display: flex;
@@ -996,13 +1002,57 @@ button.workspace-status:hover:enabled {
   border-radius: 14px 14px 4px 14px;
   padding: 10px 14px;
 }
-.message-error {
+.message-error,
+.error-notice {
   display: flex;
   align-items: flex-start;
   gap: 7px;
   font-size: 12px;
   color: #a6634c;
   margin-top: 10px;
+  overflow-wrap: anywhere;
+}
+.error-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.error-headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.error-original-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: auto;
+  padding: 0;
+  color: #8d6b5c;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.error-original-toggle:hover:enabled {
+  color: #6d4b3e;
+}
+.error-original {
+  margin: 0;
+  padding: 8px 10px;
+  width: 100%;
+  max-height: 120px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #f0ded4;
+  color: #6d4b3e;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .message-cancelled {
@@ -1816,9 +1866,10 @@ button.workspace-status:hover:enabled {
   max-width: 720px;
   margin: 0 auto 16px;
 }
-.error-notice {
+.notice.error-notice {
   background: #fcf1eb;
   color: #a9674e;
+  margin-top: 0;
 }
 .spin {
   animation: spin 1s linear infinite;
