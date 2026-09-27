@@ -9,26 +9,16 @@ import {
 import { Check, ChevronLeft, LoaderCircle } from "lucide-solid";
 import type { Group, GroupModel } from "../lib/api";
 import { command, errorMessage, pickModel } from "../lib/api";
-import {
-  parseReasoningEffort,
-  REASONING_EFFORTS,
-  type ReasoningEffort,
-} from "../lib/models";
 
 export function ModelPicker(props: {
   groups: Group[];
   groupId: number;
   model: string;
-  reasoningEffort?: string;
   style: { bottom: number; left: number };
   onModels: (models: GroupModel[]) => void;
-  onApply: (next: {
-    groupId: number;
-    model: string;
-    reasoningEffort: ReasoningEffort;
-  }) => void;
+  onApply: (next: { groupId: number; model: string }) => void;
 }) {
-  const [step, setStep] = createSignal<"group" | "model" | "effort">("group");
+  const [step, setStep] = createSignal<"group" | "model">("group");
   const [groupId, setGroupId] = createSignal(props.groupId);
   const [model, setModel] = createSignal(props.model);
   const [models, setModels] = createSignal<GroupModel[]>([]);
@@ -87,12 +77,10 @@ export function ModelPicker(props: {
     );
   });
 
-  const title = () =>
-    step() === "group" ? "选择分组" : step() === "model" ? "选择模型" : "推理强度";
+  const title = () => (step() === "group" ? "选择分组" : "选择模型");
 
   const back = () => {
-    if (step() === "effort") setStep("model");
-    else if (step() === "model") setStep("group");
+    if (step() === "model") setStep("group");
   };
 
   const chooseGroup = (group: Group) => {
@@ -105,17 +93,11 @@ export function ModelPicker(props: {
   };
 
   const chooseModel = (item: GroupModel) => {
+    if (!groupId()) return;
     setModel(item.id);
-    setStep("effort");
-  };
-
-  const chooseEffort = (effort: ReasoningEffort) => {
-    const selectedModel = model();
-    if (!groupId() || !selectedModel) return;
     props.onApply({
       groupId: groupId(),
-      model: selectedModel,
-      reasoningEffort: effort,
+      model: item.id,
     });
   };
 
@@ -199,31 +181,6 @@ export function ModelPicker(props: {
               >
                 <span>{item.name || item.id}</span>
                 <Show when={item.id === model()}>
-                  <Check size={13} />
-                </Show>
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
-      <Show when={step() === "effort"}>
-        <div class="model-picker-list">
-          <For each={REASONING_EFFORTS}>
-            {(item) => (
-              <button
-                type="button"
-                classList={{
-                  selected:
-                    item.id === parseReasoningEffort(props.reasoningEffort),
-                }}
-                onClick={() => chooseEffort(item.id)}
-              >
-                <span>{item.label}</span>
-                <Show
-                  when={
-                    item.id === parseReasoningEffort(props.reasoningEffort)
-                  }
-                >
                   <Check size={13} />
                 </Show>
               </button>

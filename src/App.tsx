@@ -43,13 +43,19 @@ import {
 } from "lucide-solid";
 import { ModelPicker } from "./components/ModelPicker";
 import { PermissionPicker } from "./components/PermissionPicker";
+import { ReasoningPicker } from "./components/ReasoningPicker";
 import Settings, {
   EndpointSelect,
   pluginSettingsTab,
   type SettingsTab,
 } from "./components/Settings";
 import WindowControls from "./components/WindowControls";
-import { modelChipLabel, parseReasoningEffort } from "./lib/models";
+import {
+  modelChipLabel,
+  parseReasoningEffort,
+  reasoningEffortLabel,
+  type ReasoningEffort,
+} from "./lib/models";
 import {
   parsePermissionMode,
   permissionChipLabel,
@@ -154,6 +160,10 @@ export default function App() {
     bottom: number;
     left: number;
   } | null>(null);
+  const [reasoningPicker, setReasoningPicker] = createSignal<{
+    bottom: number;
+    left: number;
+  } | null>(null);
   const [permissionPicker, setPermissionPicker] = createSignal<{
     bottom: number;
     left: number;
@@ -163,9 +173,11 @@ export default function App() {
     return modelChipLabel(
       config?.model,
       config?.model ? modelNames()[config.model] : undefined,
-      config?.reasoningEffort,
     );
   });
+  const effortLabel = createMemo(() =>
+    reasoningEffortLabel(state().config?.reasoningEffort),
+  );
   const rememberModels = (list: GroupModel[]) => {
     if (!list.length) return;
     setModelNames((current) => {
@@ -523,23 +535,17 @@ export default function App() {
     setWorkspaceMenu(false);
     setProjectMenu(null);
     setModelPicker(null);
+    setReasoningPicker(null);
     setPermissionPicker(null);
   };
   const applyModelSelection = async (next: {
     groupId: number;
     model: string;
-    reasoningEffort: string;
   }) => {
     if (streaming() || busy() || workspaceBusy() || !state().authenticated)
       return;
     const current = state().config;
-    const effort = parseReasoningEffort(next.reasoningEffort);
-    if (
-      current &&
-      current.groupId === next.groupId &&
-      current.model === next.model &&
-      parseReasoningEffort(current.reasoningEffort) === effort
-    ) {
+    if (current && current.groupId === next.groupId && current.model === next.model) {
       return;
     }
     setError("");
@@ -548,6 +554,28 @@ export default function App() {
       const config = await command<ConfigSummary>("configure", {
         groupId: next.groupId,
         model: next.model,
+        workspace: current?.workspace ?? "",
+      });
+      setState((current) => ({ ...current, config }));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const applyReasoningEffort = async (effort: ReasoningEffort) => {
+    if (streaming() || busy() || workspaceBusy() || !state().authenticated)
+      return;
+    const current = state().config;
+    if (current && parseReasoningEffort(current.reasoningEffort) === effort) {
+      return;
+    }
+    setError("");
+    setBusy(true);
+    try {
+      const config = await command<ConfigSummary>("configure", {
+        groupId: current?.groupId,
+        model: current?.model,
         workspace: current?.workspace ?? "",
         reasoningEffort: effort,
       });
@@ -578,6 +606,30 @@ export default function App() {
       left = Math.max(8, window.innerWidth - width - 8);
     }
     setModelPicker({
+      bottom: window.innerHeight - rect.top + 6,
+      left,
+    });
+  };
+  const openReasoningPicker = (event: MouseEvent) => {
+    event.stopPropagation();
+    if (
+      !state().authenticated ||
+      streaming() ||
+      busy() ||
+      workspaceBusy()
+    )
+      return;
+    const open = !!reasoningPicker();
+    closeMenus();
+    if (open) return;
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const width = 248;
+    let left = rect.right - width;
+    if (left < 8) left = 8;
+    if (left + width > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - width - 8);
+    }
+    setReasoningPicker({
       bottom: window.innerHeight - rect.top + 6,
       left,
     });
@@ -1545,6 +1597,19 @@ export default function App() {
           </Portal>
         )}
       </Show>
+      <Show when={reasoningPicker()}>
+        {(picker) => (
+          <Portal>
+            <ReasoningPicker
+              effort={state().config?.reasoningEffort}
+              style={picker()}
+              onApply={(effort) => {
+                void applyReasoningEffort(effort);
+              }}
+            />
+          </Portal>
+        )}
+      </Show>
       <Show when={modelPicker()}>
         {(picker) => (
           <Portal>
@@ -1552,7 +1617,6 @@ export default function App() {
               groups={groups()}
               groupId={state().config?.groupId ?? groups()[0]?.id ?? 0}
               model={state().config?.model ?? ""}
-              reasoningEffort={state().config?.reasoningEffort}
               style={picker()}
               onModels={rememberModels}
               onApply={(next) => {
@@ -2104,6 +2168,23 @@ export default function App() {
                             onClick={openModelPicker}
                           >
                             <span>{chipLabel()}</span>
+                          </button>
+                          <button
+                            type="button"
+                            class="composer-chip reasoning-chip"
+                            title={`推理强度 ${effortLabel()}`}
+                            aria-label="选择推理强度"
+                            aria-haspopup="dialog"
+                            aria-expanded={!!reasoningPicker()}
+                            disabled={
+                              !state().authenticated ||
+                              streaming() ||
+                              busy() ||
+                              workspaceBusy()
+                            }
+                            onClick={openReasoningPicker}
+                          >
+                            <span>{effortLabel()}</span>
                           </button>
                           <Show
                             when={streaming()}

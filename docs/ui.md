@@ -38,9 +38,11 @@
 | `.composer-context` | 输入栏左侧（工作区、权限） |
 | `.permission-chip` | 工作区右侧的权限选择。点击后就地选请求批准 / 帮我批准 / 完全访问 |
 | `.permission-picker` | 输入栏权限选择弹层 |
-| `.composer-actions` | 输入栏右侧（模型、发送） |
-| `.model-chip` | 发送按钮左侧的模型选择。点击后就地选分组、模型和推理强度；芯片显示「模型 推理强度」 |
+| `.composer-actions` | 输入栏右侧（模型、推理强度、发送） |
+| `.model-chip` | 发送按钮左侧的模型选择。点击后就地选分组和模型；芯片只显示模型名 |
 | `.model-picker` | 输入栏模型选择弹层 |
+| `.reasoning-chip` | 模型芯片右侧的推理强度。点击后用滑块单独调节 |
+| `.reasoning-picker` | 输入栏推理强度滑块弹层 |
 | `.send-button` | 发送按钮 |
 | `.composer-footnote` | 输入栏下方状态 |
 | `.login-page` | 登录页 |

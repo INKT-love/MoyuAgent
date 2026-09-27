@@ -1134,7 +1134,11 @@ button.workspace-status:hover:enabled {
   flex: none;
 }
 .model-chip {
-  max-width: 200px;
+  max-width: 148px;
+  flex: none;
+}
+.reasoning-chip {
+  max-width: 56px;
   flex: none;
 }
 .permission-chip {
@@ -1276,6 +1280,88 @@ button.workspace-status:hover:enabled {
 }
 .model-picker-error {
   color: var(--rust);
+}
+.reasoning-picker {
+  width: 248px;
+  max-width: min(248px, calc(100vw - 16px));
+  padding: 10px 12px 12px;
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.reasoning-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0;
+  color: #849088;
+  font-size: 11px;
+  font-weight: 600;
+}
+.reasoning-picker-head strong {
+  color: #276554;
+  font-size: 12px;
+  font-weight: 700;
+}
+.reasoning-slider {
+  display: block;
+  padding: 4px 2px 0;
+}
+.reasoning-slider input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.reasoning-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, #c9d7f6, #7b6cff 48%, #5b47ff)
+      0 / var(--progress, 66%) 100% no-repeat,
+    #eceff5;
+}
+.reasoning-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px #d7dce8, 0 2px 6px #28304a26;
+}
+.reasoning-slider input[type="range"]::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #eceff5;
+}
+.reasoning-slider input[type="range"]::-moz-range-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #c9d7f6, #7b6cff 48%, #5b47ff);
+}
+.reasoning-slider input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px #d7dce8, 0 2px 6px #28304a26;
+}
+.reasoning-picker-ticks {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px;
+  color: #9aa59d;
+  font-size: 10px;
+  font-weight: 600;
 }
 .workspace-picker {
   position: relative;
@@ -1964,7 +2050,10 @@ button.workspace-status:hover:enabled {
     max-width: 56%;
   }
   .model-chip {
-    max-width: 148px;
+    max-width: 108px;
+  }
+  .reasoning-chip {
+    max-width: 48px;
   }
   .permission-chip {
     max-width: 92px;

@@ -297,6 +297,12 @@ try {
   await expect(page.locator(".settings-page")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(page.locator(".model-picker")).toHaveCount(0);
+  await page.getByRole("button", { name: "选择推理强度" }).click();
+  await expect(page.getByRole("dialog", { name: "推理强度" })).toBeVisible();
+  await expect(page.getByRole("slider", { name: "推理强度" })).toBeVisible();
+  await expect(page.locator(".settings-page")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".reasoning-picker")).toHaveCount(0);
   await page.getByRole("button", { name: "选择权限" }).click();
   await expect(
     page.getByRole("dialog", { name: "应如何批准墨羽操作？" }),

@@ -4,6 +4,8 @@ import {
   compactModelName,
   modelChipLabel,
   parseReasoningEffort,
+  reasoningEffortAt,
+  reasoningEffortIndex,
   reasoningEffortLabel,
 } from "./models";
 
@@ -20,11 +22,9 @@ describe("compactModelName", () => {
 });
 
 describe("modelChipLabel", () => {
-  it("shows the compact name and Chinese effort", () => {
-    expect(modelChipLabel("gpt-5.6-terra", "GPT 5.6 Terra", "xhigh")).toBe(
-      "5.6 Terra 极高",
-    );
-    expect(modelChipLabel("grok-4.6", undefined, "high")).toBe("grok-4.6 高");
+  it("shows only the compact model name", () => {
+    expect(modelChipLabel("gpt-5.6-terra", "GPT 5.6 Terra")).toBe("5.6 Terra");
+    expect(modelChipLabel("grok-4.6")).toBe("grok-4.6");
   });
 
   it("falls back when no model is configured", () => {
@@ -44,5 +44,14 @@ describe("parseReasoningEffort", () => {
     expect(reasoningEffortLabel("xhigh")).toBe("极高");
     expect(reasoningEffortLabel("medium")).toBe("中");
     expect(reasoningEffortLabel("")).toBe("高");
+  });
+
+  it("maps slider positions from low to xhigh", () => {
+    expect(reasoningEffortIndex("low")).toBe(0);
+    expect(reasoningEffortIndex("high")).toBe(2);
+    expect(reasoningEffortIndex("xhigh")).toBe(3);
+    expect(reasoningEffortAt(0)).toBe("low");
+    expect(reasoningEffortAt(3)).toBe("xhigh");
+    expect(reasoningEffortAt(9)).toBe("xhigh");
   });
 });
