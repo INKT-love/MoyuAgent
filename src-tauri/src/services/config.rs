@@ -287,6 +287,12 @@ pub fn remember_workspace(preferences: &mut Preferences, path: String) {
 
 pub fn workspace_key(value: &str) -> String {
     let mut path = value.replace('\\', "/");
+    let lowered = path.to_ascii_lowercase();
+    if let Some(rest) = lowered.strip_prefix("//?/unc/") {
+        path = format!("//{}", &path[path.len() - rest.len()..]);
+    } else if let Some(rest) = lowered.strip_prefix("//?/") {
+        path = path[path.len() - rest.len()..].to_owned();
+    }
     while path.len() > 1 && path.ends_with('/') {
         path.pop();
     }
@@ -393,9 +399,11 @@ pub fn worktree_destination(repo: &Path) -> PathBuf {
 }
 
 pub async fn create_git_worktree(repo: &Path) -> Result<PathBuf, String> {
-    let repo = tokio::fs::canonicalize(repo)
-        .await
-        .map_err(|error| format!("Cannot open workspace: {error}"))?;
+    let repo = display_path(
+        tokio::fs::canonicalize(repo)
+            .await
+            .map_err(|error| format!("Cannot open workspace: {error}"))?,
+    );
     let inside = git_output(&repo, &["rev-parse", "--is-inside-work-tree"]).await?;
     if inside.trim() != "true" {
         return Err("This folder is not a Git repository".into());
@@ -488,9 +496,24 @@ pub async fn working_directory(
     {
         return Err("Workspace must be an existing absolute directory".to_owned());
     }
-    tokio::fs::canonicalize(path)
-        .await
-        .map_err(|e| e.to_string())
+    Ok(display_path(
+        tokio::fs::canonicalize(path)
+            .await
+            .map_err(|e| e.to_string())?,
+    ))
+}
+
+pub fn display_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    for prefix in ["\\\\?\\UNC\\", "//?/UNC/", "\\\\?\\", "//?/"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if prefix.ends_with("UNC\\") || prefix.ends_with("UNC/") {
+                return PathBuf::from(format!("\\\\{rest}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 pub fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -699,6 +722,24 @@ mod tests {
         assert!(workspace_eq(r"D:\alpha", "D:/alpha/"));
         assert!(!workspace_eq("", "D:/alpha"));
         assert!(!workspace_eq("D:/alpha", ""));
+    }
+
+    #[test]
+    fn display_path_strips_windows_verbatim_prefix() {
+        assert_eq!(
+            display_path(PathBuf::from(
+                r"\\?\C:\Users\qa\AppData\Roaming\top.inktandwkx.moyu-agent\workspace"
+            )),
+            PathBuf::from(r"C:\Users\qa\AppData\Roaming\top.inktandwkx.moyu-agent\workspace")
+        );
+        assert_eq!(
+            display_path(PathBuf::from(r"\\?\UNC\server\share\workspace")),
+            PathBuf::from(r"\\server\share\workspace")
+        );
+        assert_eq!(
+            workspace_key(r"\\?\C:\Users\qa\AppData\Roaming\top.inktandwkx.moyu-agent\workspace"),
+            workspace_key(r"C:\Users\qa\AppData\Roaming\top.inktandwkx.moyu-agent\workspace")
+        );
     }
 
     #[test]

@@ -107,7 +107,7 @@ impl Services {
         self.engines
             .get_or_create(
                 config::sidecar_path(app)?,
-                std::path::PathBuf::from(&config.working_directory),
+                config::display_path(std::path::PathBuf::from(&config.working_directory)),
             )
             .await
     }

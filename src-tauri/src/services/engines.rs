@@ -31,6 +31,7 @@ impl EnginePool {
         executable: PathBuf,
         workspace: PathBuf,
     ) -> Result<Arc<Engine>, String> {
+        let workspace = config::display_path(workspace);
         let key = config::workspace_key(&workspace.to_string_lossy());
         if key.is_empty() {
             return Err("Choose a workspace before starting the agent".into());

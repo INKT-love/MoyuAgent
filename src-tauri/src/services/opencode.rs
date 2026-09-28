@@ -161,7 +161,7 @@ impl Engine {
     pub fn new(executable: PathBuf, working_dir: PathBuf) -> Self {
         Self {
             executable,
-            working_dir,
+            working_dir: super::config::display_path(working_dir),
             limits: EngineLimits::default(),
             active: Mutex::new(HashMap::new()),
             server: Mutex::new(None),
@@ -765,8 +765,11 @@ impl Engine {
         method: reqwest::Method,
         path: &str,
     ) -> reqwest::RequestBuilder {
+        let directory = super::config::display_path(self.working_dir.clone())
+            .to_string_lossy()
+            .into_owned();
         self.authed(handle, method, path)
-            .query(&[("directory", self.working_dir.to_string_lossy().as_ref())])
+            .query(&[("directory", directory)])
     }
 
     async fn resolve_session(
