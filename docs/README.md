@@ -11,3 +11,5 @@
 | 改 Agent 的提示词、工具、OpenCode 配置 | [改 Agent](opencode.md) |
 
 对照用的内置插件：贪吃蛇（浮层）、测试页（设置页）、WASM探针（拦 `get_engine_status`）。
+
+发布安装包时必须提升版本号，并新建对应的 GitHub Release（例如 `v0.1.1`）。不要覆盖已有 Release 或替换其中的安装包。`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 三者版本必须一致。
