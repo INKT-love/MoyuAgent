@@ -1263,16 +1263,16 @@ impl SseInterpreter {
                 if id.len() > 128 {
                     return EventOutcome::Failed(oversized_output());
                 }
-                if self.is_user_part(props) || self.ignored_parts.contains(id) {
+                if self.is_user_part(props) {
                     return EventOutcome::Ignore;
                 }
                 if let Some(message_id) = event_message_id(props) {
                     self.part_messages
                         .insert(id.to_owned(), message_id.to_owned());
                 }
-                // Reasoning parts also stream field=text; only emit confirmed reply text.
-                if !self.text_parts.contains(id) {
-                    return EventOutcome::Ignore;
+                if self.ignored_parts.contains(id) || !self.text_parts.contains(id) {
+                    // Keep the stream alive while the model is still thinking.
+                    return EventOutcome::Status("正在思考".into());
                 }
                 let Some(delta) = props.get("delta").and_then(Value::as_str) else {
                     return EventOutcome::Ignore;
@@ -1331,7 +1331,7 @@ impl SseInterpreter {
                     return EventOutcome::Ignore;
                 }
                 self.saw_working = true;
-                EventOutcome::Status("Agent is working".into())
+                EventOutcome::Status("正在生成".into())
             }
             _ => EventOutcome::Ignore,
         }
@@ -1637,7 +1637,7 @@ impl OutputParser {
                 }))
             }
             "step_start" => Ok(Some(StreamPayload::Status {
-                message: "Agent is working".into(),
+                message: "正在生成".into(),
             })),
             "step_finish" => Ok(None),
             "tool_use" => Ok(Some(StreamPayload::Status {
@@ -2343,19 +2343,19 @@ mod tests {
                 }
             }
         }));
-        assert!(matches!(
-            interpreter.apply(&json!({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": "ses_1",
-                    "messageID": "msg_asst",
-                    "partID": "prt_think",
-                    "field": "text",
-                    "delta": "Let me think..."
-                }
-            })),
-            EventOutcome::Ignore
-        ));
+        match interpreter.apply(&json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses_1",
+                "messageID": "msg_asst",
+                "partID": "prt_think",
+                "field": "text",
+                "delta": "Let me think..."
+            }
+        })) {
+            EventOutcome::Status(message) => assert_eq!(message, "正在思考"),
+            other => panic!("unexpected {other:?}"),
+        }
         interpreter.apply(&json!({
             "type": "message.part.updated",
             "properties": {

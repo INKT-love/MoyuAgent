@@ -96,9 +96,9 @@ describe("stream lifecycle", () => {
 
   it("resets deadman on heartbeats and cancels a silent backend", () => {
     const { callbacks, stream } = setup();
-    vi.advanceTimersByTime(29_000);
+    vi.advanceTimersByTime(179_000);
     stream.receive({ requestId: "task-1", sequence: 0, kind: "heartbeat" });
-    vi.advanceTimersByTime(29_999);
+    vi.advanceTimersByTime(179_999);
     expect(callbacks.terminal).not.toHaveBeenCalled();
     expect(callbacks.status).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);

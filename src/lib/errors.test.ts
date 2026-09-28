@@ -34,5 +34,9 @@ describe("localizeError", () => {
       message: "请先登录后再开始任务。",
       original: "Sign in before starting the agent",
     });
+    expect(localizeError("Agent is working")).toEqual({
+      message: "正在生成",
+      original: "Agent is working",
+    });
   });
 });

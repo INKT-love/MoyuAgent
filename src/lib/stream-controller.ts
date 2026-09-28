@@ -100,12 +100,12 @@ export function createStreamController(callbacks: StreamCallbacks) {
             sequence: lastSequence,
             kind: "failed",
             code: "frontend_timeout",
-            message: "连接已中断，任务已停止。请重新发送。",
+            message: "等待回复超时，任务已停止。请重新发送。",
             retryable: true,
           },
           true,
         ),
-      30_000,
+      180_000,
     );
   };
 

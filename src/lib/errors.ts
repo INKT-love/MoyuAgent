@@ -205,6 +205,25 @@ const TRANSLATIONS: Array<[RegExp, string]> = [
   [/^Checking OpenCode$/i, "正在检查本地引擎"],
   [/^Starting OpenCode$/i, "正在启动本地引擎"],
   [/^OpenCode ready$/i, "本地引擎已就绪"],
+  [/^Agent is working$/i, "正在生成"],
+  [/^Incremental stream connected$/i, "增量流已连接"],
+  [/^Agent tool finished$/i, "工具已完成"],
+  [
+    /^OpenCode stopped producing output and was terminated$/i,
+    "本地引擎长时间没有输出，任务已停止。",
+  ],
+  [
+    /^The agent exceeded the maximum run duration$/i,
+    "任务运行时间过长，已停止。",
+  ],
+  [
+    /^The OpenCode event stream was interrupted$/i,
+    "本地引擎事件流中断，请重试。",
+  ],
+  [
+    /^OpenCode closed the event stream before the response finished$/i,
+    "本地引擎在回复完成前关闭了事件流。",
+  ],
 ];
 
 function withOriginal(message: string, original: string): LocalizedError {
@@ -218,7 +237,10 @@ export function localizeError(raw?: string | null): LocalizedError {
     if (pattern.test(original)) return withOriginal(message, original);
   }
   if (/[\u4e00-\u9fff]/.test(original)) return { message: original };
-  return withOriginal("操作失败，请稍后重试。", original);
+  return {
+    message: "操作失败，请稍后重试。",
+    original,
+  };
 }
 
 export function errorRaw(error: unknown): string {
