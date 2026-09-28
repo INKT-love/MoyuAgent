@@ -1,6 +1,6 @@
 [package]
 name = "moyu-agent"
-version = "0.1.1",
+version = "0.1.1"
 description = "Moyu desktop agent powered by OpenCode"
 authors = ["Moyu"]
 edition = "2021"
