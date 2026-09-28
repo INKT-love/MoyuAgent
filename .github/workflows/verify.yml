@@ -29,3 +29,4 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
       - run: npm run test:sidecar
+        timeout-minutes: 8

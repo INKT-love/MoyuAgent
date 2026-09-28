@@ -61,14 +61,17 @@ child.stdout.on("data", data => {
 });
 child.stderr.on("data", data => stderr.push(data.toString()));
 child.stdin.end("Reply with a short sentence without tools.");
+const timeoutMs = process.platform === "win32" ? 180000 : 60000;
 const timer = setTimeout(() => {
+  stderr.push(`sidecar timed out after ${timeoutMs}ms`);
   if (process.platform === "win32") { try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }); } catch {} }
   else child.kill("SIGKILL");
-}, 60000);
+}, timeoutMs);
 try {
   const code = await new Promise((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
-  assert.equal(code, 0, stderr.join("").slice(-2000));
-  assert.ok(events.some(event => event.type === "bridge_ready"));
+  const note = stderr.join("").slice(-4000);
+  assert.equal(code, 0, note || `OpenCode exited with ${code}`);
+  assert.ok(events.some(event => event.type === "bridge_ready"), `missing bridge_ready. ${note}`);
   assert.equal(events.filter(event => event.type === "text_delta").map(event => event.text).join(""), "First token. Last token.");
   assert.ok(firstDeltaAt < providerCompletedAt - 500, "Text must arrive before API response completion");
   console.log(`PASS: actual OpenCode sidecar first delta arrived ${providerCompletedAt - firstDeltaAt} ms before completion.`);
