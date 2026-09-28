@@ -822,11 +822,7 @@ impl Engine {
                 )
             })?;
         if !response.status().is_success() {
-            return Err(prefix_http_error(
-                "Unable to create an OpenCode session",
-                response,
-            )
-            .await);
+            return Err(prefix_http_error("Unable to create an OpenCode session", response).await);
         }
         let body = response.json::<Value>().await.map_err(|_| {
             StreamPayload::failed("invalid_output", "OpenCode returned an invalid session")
@@ -1268,7 +1264,8 @@ impl SseInterpreter {
                     return EventOutcome::Ignore;
                 }
                 if let Some(message_id) = event_message_id(props) {
-                    self.part_messages.insert(id.to_owned(), message_id.to_owned());
+                    self.part_messages
+                        .insert(id.to_owned(), message_id.to_owned());
                 }
                 // Reasoning parts also stream field=text; only emit confirmed reply text.
                 if !self.text_parts.contains(id) {
@@ -1297,7 +1294,8 @@ impl SseInterpreter {
                     return EventOutcome::Failed(oversized_output());
                 }
                 if let Some(message_id) = event_message_id(props) {
-                    self.part_messages.insert(id.to_owned(), message_id.to_owned());
+                    self.part_messages
+                        .insert(id.to_owned(), message_id.to_owned());
                 }
                 if self.is_user_part(props) || !is_visible_text_part(part) {
                     self.ignore_part(id);
@@ -1341,15 +1339,27 @@ fn event_session_id(properties: &Value) -> Option<&str> {
     properties
         .get("sessionID")
         .and_then(Value::as_str)
-        .or_else(|| properties.pointer("/part/sessionID").and_then(Value::as_str))
-        .or_else(|| properties.pointer("/info/sessionID").and_then(Value::as_str))
+        .or_else(|| {
+            properties
+                .pointer("/part/sessionID")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            properties
+                .pointer("/info/sessionID")
+                .and_then(Value::as_str)
+        })
 }
 
 fn event_message_id(properties: &Value) -> Option<&str> {
     properties
         .get("messageID")
         .and_then(Value::as_str)
-        .or_else(|| properties.pointer("/part/messageID").and_then(Value::as_str))
+        .or_else(|| {
+            properties
+                .pointer("/part/messageID")
+                .and_then(Value::as_str)
+        })
         .or_else(|| properties.pointer("/info/id").and_then(Value::as_str))
         .or_else(|| properties.pointer("/message/id").and_then(Value::as_str))
 }

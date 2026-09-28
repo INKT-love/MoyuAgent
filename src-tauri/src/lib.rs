@@ -5,8 +5,8 @@ use services::{
     api_client::{self, ApiClient, Endpoint},
     auth::{self, AuthService, Group, GroupModel, LoginResult, User},
     config::{self, ConfigSummary, Preferences, WorkspaceActionResult},
-    harness::{self, PluginInfo, PluginMixin, PluginUi},
     engines::EnginePool,
+    harness::{self, PluginInfo, PluginMixin, PluginUi},
     history::{self, HistorySnapshot},
     opencode::{Engine, EngineHealth, RunEnvironment, RunRequest},
     stream::StreamEvent,
@@ -483,9 +483,7 @@ async fn configure(
         working_directory: directory.to_string_lossy().into_owned(),
         user_id: user.id,
         reasoning_effort: config::normalize_reasoning_effort(
-            reasoning_effort
-                .as_deref()
-                .or(previous_effort.as_deref()),
+            reasoning_effort.as_deref().or(previous_effort.as_deref()),
         ),
         permission_mode: config::normalize_permission_mode(
             permission_mode
@@ -902,10 +900,7 @@ async fn get_engine_status(
     state: State<'_, AppState>,
 ) -> Result<EngineHealth, String> {
     let services = state.services(&app).await?;
-    Ok(services
-        .engines
-        .health(&config::sidecar_path(&app)?)
-        .await)
+    Ok(services.engines.health(&config::sidecar_path(&app)?).await)
 }
 
 fn native_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {

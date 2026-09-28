@@ -177,7 +177,10 @@ pub fn default_reasoning_effort() -> String {
 }
 
 pub fn normalize_reasoning_effort(value: Option<&str>) -> String {
-    match value.map(|item| item.trim().to_ascii_lowercase()).as_deref() {
+    match value
+        .map(|item| item.trim().to_ascii_lowercase())
+        .as_deref()
+    {
         Some("low") => "low".into(),
         Some("medium") => "medium".into(),
         Some("high") => "high".into(),
@@ -191,7 +194,10 @@ pub fn default_permission_mode() -> String {
 }
 
 pub fn normalize_permission_mode(value: Option<&str>) -> String {
-    match value.map(|item| item.trim().to_ascii_lowercase()).as_deref() {
+    match value
+        .map(|item| item.trim().to_ascii_lowercase())
+        .as_deref()
+    {
         Some("ask") => "ask".into(),
         Some("full") => "full".into(),
         Some("assist") => "assist".into(),
@@ -323,9 +329,7 @@ pub fn rename_workspace(preferences: &mut Preferences, path: &str, name: &str) {
         .trim()
         .to_owned();
     if !name.is_empty() {
-        preferences
-            .workspace_labels
-            .insert(path.to_owned(), name);
+        preferences.workspace_labels.insert(path.to_owned(), name);
     }
 }
 
@@ -707,18 +711,14 @@ mod tests {
             preferences.pinned_workspaces,
             [r"D:\a".to_owned(), r"D:\b".to_owned()]
         );
-        assert!(
-            preferences
-                .recent_workspaces
-                .iter()
-                .any(|path| path == r"D:\a")
-        );
-        assert!(
-            preferences
-                .recent_workspaces
-                .iter()
-                .any(|path| path == r"D:\b")
-        );
+        assert!(preferences
+            .recent_workspaces
+            .iter()
+            .any(|path| path == r"D:\a"));
+        assert!(preferences
+            .recent_workspaces
+            .iter()
+            .any(|path| path == r"D:\b"));
         pin_workspace(&mut preferences, r"D:\a", false);
         assert_eq!(preferences.pinned_workspaces, [r"D:\b".to_owned()]);
     }
@@ -778,10 +778,7 @@ mod tests {
         assert_eq!(config.permission_mode, "assist");
         assert_eq!(normalize_permission_mode(Some("FULL")), "full");
         assert_eq!(normalize_permission_mode(Some("yolo")), "assist");
-        assert_eq!(
-            permission_config("ask")["webfetch"],
-            json!("deny")
-        );
+        assert_eq!(permission_config("ask")["webfetch"], json!("deny"));
     }
 
     #[test]
@@ -794,17 +791,16 @@ mod tests {
 
     #[test]
     fn worktree_destination_uses_sibling_folder() {
-        let root = std::env::temp_dir().join(format!(
-            "moyu-wt-src-{}",
-            uuid::Uuid::new_v4().as_simple()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("moyu-wt-src-{}", uuid::Uuid::new_v4().as_simple()));
         std::fs::create_dir_all(&root).unwrap();
         let dest = worktree_destination(&root);
         assert_eq!(
             dest,
-            root.parent()
-                .unwrap()
-                .join(format!("{}-worktree", root.file_name().unwrap().to_string_lossy()))
+            root.parent().unwrap().join(format!(
+                "{}-worktree",
+                root.file_name().unwrap().to_string_lossy()
+            ))
         );
         assert!(!dest.exists());
         let _ = std::fs::remove_dir_all(&root);
