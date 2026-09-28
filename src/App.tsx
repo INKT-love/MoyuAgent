@@ -90,6 +90,7 @@ import {
   createStreamController,
   type StreamEvent,
 } from "./lib/stream-controller";
+import { applyStreamTerminal } from "./lib/stream-terminal";
 
 interface Message {
   id: string;
@@ -1133,21 +1134,7 @@ export default function App() {
           sessionId: id,
         })),
       terminal: (terminal) => {
-        patchResponse((message) => {
-          if (
-            terminal.kind === "failed" &&
-            message.text.trim() &&
-            (terminal.code === "frontend_timeout" ||
-              terminal.code === "idle_timeout")
-          ) {
-            return { ...message, state: "completed", error: undefined };
-          }
-          return {
-            ...message,
-            state: terminal.kind,
-            error: terminal.kind === "failed" ? terminal.message : undefined,
-          };
-        });
+        patchResponse((message) => applyStreamTerminal(message, terminal));
         channel.onmessage = () => undefined;
         streams.release(conversationId);
         syncStreams();

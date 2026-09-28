@@ -1168,6 +1168,7 @@ struct SseInterpreter {
     assistant_messages: HashSet<String>,
     ignored_parts: HashSet<String>,
     saw_working: bool,
+    last_error: Option<String>,
 }
 
 impl SseInterpreter {
@@ -1182,6 +1183,7 @@ impl SseInterpreter {
             assistant_messages: HashSet::new(),
             ignored_parts: HashSet::new(),
             saw_working: false,
+            last_error: None,
         }
     }
 
@@ -1214,6 +1216,18 @@ impl SseInterpreter {
         self.ignored_parts.insert(id.to_owned());
         self.text_parts.remove(id);
         self.pending_text.remove(id);
+    }
+
+    fn has_visible_text(&self) -> bool {
+        self.streamed_parts
+            .iter()
+            .any(|id| !self.ignored_parts.contains(id))
+            || self.pending_text.iter().any(|(id, text)| {
+                !text.is_empty()
+                    && self.text_parts.contains(id)
+                    && !self.ignored_parts.contains(id)
+                    && !self.streamed_parts.contains(id)
+            })
     }
 
     fn take_pending(&mut self) -> Vec<String> {
@@ -1313,13 +1327,23 @@ impl SseInterpreter {
                 }
                 EventOutcome::Ignore
             }
-            "session.idle" => EventOutcome::Completed,
+            "session.idle" => {
+                if self.has_visible_text() {
+                    EventOutcome::Completed
+                } else if let Some(message) = self.last_error.take() {
+                    EventOutcome::Failed(StreamPayload::failed("opencode_error", &message))
+                } else {
+                    EventOutcome::Completed
+                }
+            }
             "session.error" => {
                 let error = props.get("error").cloned().unwrap_or(Value::Null);
-                EventOutcome::Failed(StreamPayload::failed(
-                    "opencode_error",
-                    &opencode_error_message(&json!({ "error": error })),
-                ))
+                if is_abort_error(&error) {
+                    return EventOutcome::Ignore;
+                }
+                self.last_error = Some(opencode_error_message(&json!({ "error": error })));
+                self.saw_working = true;
+                EventOutcome::Status("正在生成".into())
             }
             "session.status" => {
                 let status = props.get("status").unwrap_or(&Value::Null);
@@ -1327,11 +1351,18 @@ impl SseInterpreter {
                     .get("type")
                     .and_then(Value::as_str)
                     .or_else(|| status.as_str());
-                if kind == Some("idle") || self.saw_working {
-                    return EventOutcome::Ignore;
+                match kind {
+                    Some("idle") => EventOutcome::Ignore,
+                    Some("retry") => {
+                        self.saw_working = true;
+                        EventOutcome::Status("正在重试".into())
+                    }
+                    _ if self.saw_working => EventOutcome::Ignore,
+                    _ => {
+                        self.saw_working = true;
+                        EventOutcome::Status("正在生成".into())
+                    }
                 }
-                self.saw_working = true;
-                EventOutcome::Status("正在生成".into())
             }
             _ => EventOutcome::Ignore,
         }
@@ -1379,6 +1410,15 @@ fn event_message_role(properties: &Value) -> Option<&str> {
 fn is_visible_text_part(part: &Value) -> bool {
     part.get("type").and_then(Value::as_str) == Some("text")
         && part.get("ignored").and_then(Value::as_bool) != Some(true)
+}
+
+fn is_abort_error(error: &Value) -> bool {
+    let name = error
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| error.pointer("/data/name").and_then(Value::as_str))
+        .unwrap_or("");
+    name.eq_ignore_ascii_case("MessageAbortedError")
 }
 
 async fn send_chunks(
@@ -2449,6 +2489,136 @@ mod tests {
             EventOutcome::Completed
         ));
         assert_eq!(interpreter.take_pending(), ["Hello!"]);
+    }
+
+    #[test]
+    fn sse_interpreter_keeps_listening_after_retryable_session_error() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        interpreter.apply(&json!({
+            "type": "message.updated",
+            "properties": {
+                "info": { "id": "msg_asst", "sessionID": "ses_1", "role": "assistant" }
+            }
+        }));
+        match interpreter.apply(&json!({
+            "type": "session.error",
+            "properties": {
+                "sessionID": "ses_1",
+                "error": {
+                    "name": "APIError",
+                    "data": { "message": "rate limited", "isRetryable": true }
+                }
+            }
+        })) {
+            EventOutcome::Status(message) => assert_eq!(message, "正在生成"),
+            other => panic!("unexpected {other:?}"),
+        }
+        match interpreter.apply(&json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_1",
+                "status": {
+                    "type": "retry",
+                    "attempt": 1,
+                    "message": "rate limited",
+                    "next": 1_700_000_000_000u64
+                }
+            }
+        })) {
+            EventOutcome::Status(message) => assert_eq!(message, "正在重试"),
+            other => panic!("unexpected {other:?}"),
+        }
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_asst",
+                    "type": "text",
+                    "text": "",
+                    "messageID": "msg_asst",
+                    "sessionID": "ses_1"
+                }
+            }
+        }));
+        match interpreter.apply(&json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "ses_1",
+                "messageID": "msg_asst",
+                "partID": "prt_asst",
+                "field": "text",
+                "delta": "Hello!"
+            }
+        })) {
+            EventOutcome::Chunk(text) => assert_eq!(text, "Hello!"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            })),
+            EventOutcome::Completed
+        ));
+    }
+
+    #[test]
+    fn sse_interpreter_ignores_abort_errors_and_completes_visible_text() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        interpreter.apply(&json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": { "id": "prt_1", "type": "text", "text": "Hello!" }
+            }
+        }));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.error",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "error": {
+                        "name": "MessageAbortedError",
+                        "data": { "message": "aborted" }
+                    }
+                }
+            })),
+            EventOutcome::Ignore
+        ));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "session.idle",
+                "properties": { "sessionID": "ses_1" }
+            })),
+            EventOutcome::Completed
+        ));
+        assert_eq!(interpreter.take_pending(), ["Hello!"]);
+    }
+
+    #[test]
+    fn sse_interpreter_fails_on_idle_only_when_no_reply_arrived() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        interpreter.apply(&json!({
+            "type": "session.error",
+            "properties": {
+                "sessionID": "ses_1",
+                "error": {
+                    "name": "UnknownError",
+                    "data": { "message": "provider exploded" }
+                }
+            }
+        }));
+        match interpreter.apply(&json!({
+            "type": "session.idle",
+            "properties": { "sessionID": "ses_1" }
+        })) {
+            EventOutcome::Failed(StreamPayload::Failed { code, message, .. }) => {
+                assert_eq!(code, "opencode_error");
+                assert_eq!(message, "provider exploded");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]

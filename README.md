@@ -61,7 +61,7 @@ OpenCode starts with the signed-in, configured app and stays running. Each works
 
 An mpsc bound alone does not bound Tauri's IPC queue. The ACK window supplies end-to-end flow control. A reserved terminal slot bypasses a saturated ACK window, and frontend cancellation is independent of the SSE reader.
 
-Limits: 64 KiB prompt, 1 MiB SSE event, 16 KiB forwarded chunk, 32 MiB total event bytes; 5s heartbeat, 30s ACK timeout, 180s idle timeout, 30-minute total runtime. The UI has its own 30s connection watchdog. Bounds produce a clear failure rather than indefinite loading or uncontrolled allocation.
+Limits: 64 KiB prompt, 1 MiB SSE event, 16 KiB forwarded chunk, 32 MiB total event bytes; 5s heartbeat, 30s ACK timeout, 180s idle timeout, 30-minute total runtime. The UI has its own 180s connection watchdog. Bounds produce a clear failure rather than indefinite loading or uncontrolled allocation.
 
 ## Authentication and Configuration
 

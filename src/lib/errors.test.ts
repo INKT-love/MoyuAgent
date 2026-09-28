@@ -38,5 +38,9 @@ describe("localizeError", () => {
       message: "正在生成",
       original: "Agent is working",
     });
+    expect(localizeError("OpenCode reported an error")).toEqual({
+      message: "本地引擎报告了一条错误。",
+      original: "OpenCode reported an error",
+    });
   });
 });

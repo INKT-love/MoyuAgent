@@ -224,6 +224,7 @@ const TRANSLATIONS: Array<[RegExp, string]> = [
     /^OpenCode closed the event stream before the response finished$/i,
     "本地引擎在回复完成前关闭了事件流。",
   ],
+  [/^OpenCode reported an error$/i, "本地引擎报告了一条错误。"],
 ];
 
 function withOriginal(message: string, original: string): LocalizedError {
