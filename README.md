@@ -28,9 +28,9 @@ Production build, after preparing the sidecar for the current host:
 npm run tauri -- build
 ```
 
-Each published installer is a new GitHub Release with a new version number (`v0.1.1`, `v0.1.2`, …). Keep `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` in sync, then create a matching `vX.Y.Z` tag. Do not replace an existing Release or overwrite its installer.
+Each published installer is a new GitHub Release with a new version number (`v0.1.1`, `v0.1.2`, …). Keep `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` in sync, then push a matching `vX.Y.Z` tag. GitHub Actions builds the Windows NSIS installer and creates that Release. Do not replace an existing Release or overwrite its installer.
 
-On Windows, run this from a Visual Studio Developer PowerShell, or first dot-source `. ./.tools/env-msvc.ps1` in this workspace. macOS builds require Xcode Command Line Tools. Linux needs WebKitGTK 4.1 and an unlocked Secret Service keyring. Platform-specific sidecars are prepared for Windows x64, macOS x64/arm64, and Linux x64/arm64. This is a desktop application; the requested mobile entry attribute does not imply a working mobile OpenCode sidecar.
+On Windows, run this from a Visual Studio Developer PowerShell, or first dot-source `. ./.tools/env-msvc.ps1` in this workspace. Published Windows installers are built by `.github/workflows/release.yml` on a `vX.Y.Z` tag. macOS builds require Xcode Command Line Tools. Linux needs WebKitGTK 4.1 and an unlocked Secret Service keyring. Platform-specific sidecars are prepared for Windows x64, macOS x64/arm64, and Linux x64/arm64. This is a desktop application; the requested mobile entry attribute does not imply a working mobile OpenCode sidecar.
 
 ## Delivery Steps
 

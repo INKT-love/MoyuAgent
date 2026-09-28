@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Check installer version
+        run: node scripts/check-release-version.mjs ${{ env.TAG }}
+
+      - name: Refuse to replace an existing release
+        if: github.ref_type == 'tag'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/assert-new-github-release.mjs ${{ env.TAG }}
+
+      - run: npm run sidecar:prepare
+      - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+      - run: npm run tauri -- build --bundles nsis
+
+      - name: Locate installer
+        id: installer
+        shell: pwsh
+        run: |
+          $version = node scripts/check-release-version.mjs
+          $path = Join-Path "src-tauri/target/release/bundle/nsis" "Moyu Agent_${version}_x64-setup.exe"
+          if (-not (Test-Path -LiteralPath $path)) {
+            throw "Installer not found: $path"
+          }
+          $full = (Resolve-Path -LiteralPath $path).Path
+          $artifact = "Moyu.Agent_${version}_x64-setup.exe"
+          "path=$full" >> $env:GITHUB_OUTPUT
+          "name=$artifact" >> $env:GITHUB_OUTPUT
+          Write-Output "installer=$full artifact=$artifact"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.installer.outputs.name }}
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish new GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          node scripts/assert-new-github-release.mjs $env:TAG
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = $env:TAG.TrimStart('v')
+          $notes = "Windows x64 NSIS installer for Moyu Agent $version.`nBuilt by GitHub Actions from $($env:GITHUB_SHA)."
+          gh release create $env:TAG --title $env:TAG --notes $notes --verify-tag -- "${{ steps.installer.outputs.path }}"
