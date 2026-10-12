@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import assert from "node:assert/strict";
 
 await mkdir("artifacts", { recursive: true });
-const browser = await chromium.launch({ channel: "msedge", headless: true });
+const browser = await chromium.launch(process.env.MOYU_BROWSER_PATH ? { executablePath: process.env.MOYU_BROWSER_PATH, headless: true } : { channel: "msedge", headless: true });
 const errors = [];
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
@@ -89,6 +89,46 @@ try {
           { pluginId: "lab", pluginName: "测试页", target: "", select: ".settings-page", at: "RETURN", priority: 1000, html: "<p>settings-mixin</p>", script: null },
         ];
         if (command === "install_plugin" || command === "set_plugin_enabled" || command === "uninstall_plugin") return [];
+        if (command.startsWith("store_") || command.endsWith("_skill") || command === "list_skills") {
+          const store = (testState.store = testState.store || {
+            calls: [],
+            installed: {},
+            catalog: [
+              { id: "reviewer", kind: "plugin", name: "代码审查", description: "审查改动并给出意见", version: "1.2.0", author: "Moyu", tags: ["review"], url: "https://store.example/reviewer.zip", sha256: "a".repeat(64) },
+              { id: "git-release", kind: "skill", name: "发布助手", description: "按规范打 tag 并写发布说明", version: "1.0.0", author: "Moyu", tags: ["git"], url: "https://store.example/git-release.zip", sha256: "b".repeat(64) },
+            ],
+          });
+          store.calls.push({ command, args: structuredClone(args) });
+          const view = () => ({
+            url: "https://store.example/index.json",
+            items: store.catalog.map(item => ({ ...item, installed: !!store.installed[item.id], installedVersion: store.installed[item.id] ? item.version : null, updateAvailable: false, enabled: store.installed[item.id]?.enabled ?? false })),
+            skills: store.catalog.filter(item => item.kind === "skill" && store.installed[item.id]).map(item => ({ name: item.id, description: item.description, enabled: store.installed[item.id].enabled })),
+          });
+          if (command === "store_catalog") return view();
+          if (command === "store_set_url") return args.url || "https://store.example/index.json";
+          if (command === "store_cancel") return;
+          if (command === "store_prepare") {
+            await new Promise(resolve => setTimeout(resolve, 60));
+            return { token: `tok-${args.id}`, id: args.id, kind: args.kind, name: store.catalog.find(item => item.id === args.id).name, version: "1.2.0", replaces: null, capabilities: args.kind === "plugin"
+              ? [{ risk: "high", title: "拦截后端命令", detail: "包含 backend.wasm，可以在命令到达后端前读取并改写它们。" }, { risk: "low", title: "基本信息", detail: "插件清单已读取" }]
+              : [{ risk: "medium", title: "附带脚本", detail: "scripts/run.sh" }] };
+          }
+          if (command === "store_install") {
+            const id = args.token.replace("tok-", "");
+            store.installed[id] = { enabled: true };
+            return view();
+          }
+          if (command === "set_skill_enabled") { store.installed[args.name].enabled = args.enabled; return view().skills; }
+          if (command === "uninstall_skill") { delete store.installed[args.name]; return view().skills; }
+          if (command === "list_skills") return view().skills;
+        }
+        if (command === "get_plugin_settings" || command === "set_plugin_settings") {
+          testState.pluginSettings = testState.pluginSettings || {};
+          const id = args.id || "unknown";
+          if (command === "set_plugin_settings") testState.pluginSettings[id] = args.values || {};
+          const values = testState.pluginSettings[id] || {};
+          return { id, values, secrets: {}, applied: { persisted: true, instructions: false, mcp: false, proxy: false, details: ["插件设置已落盘，可再次读取核对"] } };
+        }
         if (command === "get_engine_status") return { executableAvailable: true, activeRequests: streams.size };
         if (command === "ack_stream") return;
         if (command === "list_conversations") return structuredClone(history);
@@ -338,8 +378,42 @@ try {
   await page.getByText("配置已写入", { exact: true }).waitFor();
   assert.deepEqual(await page.evaluate(() => window.__MOYU_TEST__.configureRequests.at(-1)), { groupId: 2, model: "gpt-5.6-terra", workspace: "D:\\picked" }, "Saving a filtered selection must send the displayed model");
   await expectModel("gpt-5.6-terra", "The filtered model selection must remain visible after saving");
-  await page.getByRole("tab", { name: "插件" }).click();
+  assert.equal(await page.getByRole("tab", { name: "插件" }).count(), 0, "Plugins must no longer live under settings");
+  await page.getByRole("button", { name: "插件", exact: true }).click();
   await page.getByText("简洁模式").waitFor();
+  assert.equal(await page.locator(".topbar-title strong").innerText(), "插件");
+  await page.getByRole("button", { name: "商店", exact: true }).click();
+  await page.getByText("代码审查").waitFor();
+  assert.equal(await page.locator(".topbar-title strong").innerText(), "商店");
+  await page.screenshot({ path: "artifacts/store-desktop.png", fullPage: true });
+  for (const width of [390, 360]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForFunction(() => document.querySelector(".sidebar").getBoundingClientRect().right <= 0);
+    await page.screenshot({ path: `artifacts/store-${width}.png`, fullPage: true });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `Store overflow at width ${width}`);
+  }
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await page.getByRole("tab", { name: "技能" }).click();
+  await page.getByText("发布助手").waitFor();
+  assert.equal(await page.getByText("代码审查").count(), 0, "Tabs must filter by kind");
+  await page.getByLabel("搜索商店").fill("不存在的东西");
+  await page.getByText("没有符合搜索的条目").waitFor();
+  await page.getByLabel("搜索商店").fill("GIT");
+  await page.getByText("发布助手").waitFor();
+  await page.getByRole("button", { name: "安装", exact: true }).click();
+  await page.getByRole("dialog").getByText("附带脚本").waitFor();
+  await page.screenshot({ path: "artifacts/store-confirm.png", fullPage: true });
+  await page.getByRole("dialog").getByRole("button", { name: "取消" }).click();
+  await page.waitForFunction(() => !document.querySelector("dialog[open]"));
+  assert.equal(await page.evaluate(() => window.__MOYU_TEST__.store.calls.some(call => call.command === "store_install")), false, "Cancelling must not install");
+  assert.equal(await page.evaluate(() => window.__MOYU_TEST__.store.calls.at(-1).command), "store_cancel", "Cancelling must discard the staged package");
+  await page.getByRole("button", { name: "安装", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "确认安装" }).click();
+  await page.getByText("已是最新").waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__MOYU_TEST__.store.calls.filter(call => call.command === "store_install").map(call => call.args)), [{ token: "tok-git-release" }]);
+  await page.getByLabel("卸载 发布助手").click();
+  await page.getByRole("button", { name: "安装", exact: true }).waitFor();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("tab", { name: "线路" }).click();
   const expectLine = async (index, url) => {
     await page.getByText(url, { exact: true }).waitFor();

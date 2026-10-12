@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-store-set-url"
+description = "Enables the store_set_url command without any pre-configured scope."
+commands.allow = ["store_set_url"]
+
+[[permission]]
+identifier = "deny-store-set-url"
+description = "Denies the store_set_url command without any pre-configured scope."
+commands.deny = ["store_set_url"]

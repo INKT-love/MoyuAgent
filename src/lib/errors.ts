@@ -225,6 +225,13 @@ const TRANSLATIONS: Array<[RegExp, string]> = [
     "本地引擎在回复完成前关闭了事件流。",
   ],
   [/^OpenCode reported an error$/i, "本地引擎报告了一条错误。"],
+  [/^Invalid plugin id$/i, "插件标识无效。"],
+  [/^Plugin not found$/i, "找不到这个插件。"],
+  [/^Plugin settings must be an object$/i, "插件设置必须是对象。"],
+  [/^Plugin settings exceeded the size limit$/i, "插件设置超出大小限制。"],
+  [/^Invalid plugin secret name$/i, "插件密钥名无效。"],
+  [/^Plugin secrets must be strings$/i, "插件密钥必须是字符串。"],
+  [/^Cannot write plugin settings(?::\s*.+)?$/i, "无法写入插件设置。"],
 ];
 
 function withOriginal(message: string, original: string): LocalizedError {

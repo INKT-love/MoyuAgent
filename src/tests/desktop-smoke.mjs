@@ -173,6 +173,20 @@ try {
             return [];
           case "list_plugin_mixins":
             return [];
+          case "get_plugin_settings":
+          case "set_plugin_settings":
+            return {
+              id: payload.id,
+              values: payload.values || {},
+              secrets: {},
+              applied: {
+                persisted: true,
+                instructions: false,
+                mcp: false,
+                proxy: false,
+                details: [],
+              },
+            };
           case "list_conversations":
             return history;
           case "save_conversations":

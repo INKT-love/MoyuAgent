@@ -44,12 +44,16 @@ pub struct RunEnvironment {
     pub api_key: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Drop for RunEnvironment {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.api_key.zeroize();
+        for (_, value) in &mut self.extra_env {
+            value.zeroize();
+        }
     }
 }
 
@@ -108,17 +112,30 @@ struct ServerFingerprint {
     config: Vec<u8>,
     api_key: String,
     working_dir: PathBuf,
+    extra_env: Vec<(String, String)>,
 }
 
 impl Drop for ServerFingerprint {
     fn drop(&mut self) {
         self.api_key.zeroize();
+        for (_, value) in &mut self.extra_env {
+            value.zeroize();
+        }
     }
 }
 
 impl ServerFingerprint {
-    fn matches(&self, config: &[u8], api_key: &str, working_dir: &Path) -> bool {
-        self.config == config && self.api_key == api_key && self.working_dir == working_dir
+    fn matches(
+        &self,
+        config: &[u8],
+        api_key: &str,
+        working_dir: &Path,
+        extra_env: &[(String, String)],
+    ) -> bool {
+        self.config == config
+            && self.api_key == api_key
+            && self.working_dir == working_dir
+            && self.extra_env == extra_env
     }
 }
 
@@ -235,7 +252,12 @@ impl Engine {
             if healthy
                 && server
                     .fingerprint
-                    .matches(&config, &environment.api_key, &self.working_dir)
+                    .matches(
+                        &config,
+                        &environment.api_key,
+                        &self.working_dir,
+                        &environment.extra_env,
+                    )
             {
                 self.server_ready.store(true, Ordering::Release);
                 return Ok(false);
@@ -555,7 +577,11 @@ impl Engine {
                 .env("OPENCODE_DISABLE_TERMINAL_TITLE", "true")
                 .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true")
                 .env("NO_COLOR", "1")
-                .env("FORCE_COLOR", "0")
+                .env("FORCE_COLOR", "0");
+            for (key, value) in &environment.extra_env {
+                command.env(key, value);
+            }
+            command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -647,6 +673,7 @@ impl Engine {
                             config,
                             api_key: environment.api_key.clone(),
                             working_dir: self.working_dir.clone(),
+                            extra_env: environment.extra_env.clone(),
                         },
                         stdout_task,
                         stderr_task,
@@ -1167,8 +1194,42 @@ struct SseInterpreter {
     user_messages: HashSet<String>,
     assistant_messages: HashSet<String>,
     ignored_parts: HashSet<String>,
+    subagent_states: HashMap<String, String>,
     saw_working: bool,
     last_error: Option<String>,
+}
+
+/// Describes a sub-agent delegation (OpenCode's `task` tool) as a short status line.
+fn subagent_status(part: &Value) -> Option<String> {
+    if part.get("type").and_then(Value::as_str) != Some("tool")
+        || part.get("tool").and_then(Value::as_str) != Some("task")
+    {
+        return None;
+    }
+    let state = part.get("state")?;
+    let input = state.get("input");
+    let agent = input
+        .and_then(|input| input.get("subagent_type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("subagent");
+    let description = input
+        .and_then(|input| input.get("description"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(60).collect::<String>());
+    let label = match description {
+        Some(description) => format!("{agent}: {description}"),
+        None => agent.to_owned(),
+    };
+    match state.get("status").and_then(Value::as_str)? {
+        "pending" | "running" => Some(format!("子 Agent 运行中 · {label}")),
+        "completed" => Some(format!("子 Agent 已完成 · {label}")),
+        "error" => Some(format!("子 Agent 失败 · {label}")),
+        _ => None,
+    }
 }
 
 impl SseInterpreter {
@@ -1182,6 +1243,7 @@ impl SseInterpreter {
             user_messages: HashSet::new(),
             assistant_messages: HashSet::new(),
             ignored_parts: HashSet::new(),
+            subagent_states: HashMap::new(),
             saw_working: false,
             last_error: None,
         }
@@ -1316,6 +1378,12 @@ impl SseInterpreter {
                 }
                 if self.is_user_part(props) || !is_visible_text_part(part) {
                     self.ignore_part(id);
+                    if let Some(message) = subagent_status(part) {
+                        if self.subagent_states.get(id) != Some(&message) {
+                            self.subagent_states.insert(id.to_owned(), message.clone());
+                            return EventOutcome::Status(message);
+                        }
+                    }
                     return EventOutcome::Ignore;
                 }
                 self.ignored_parts.remove(id);
@@ -2080,6 +2148,7 @@ mod tests {
             api_key: "fixture-only".into(),
             model: None,
             reasoning_effort: None,
+            extra_env: Vec::new(),
         }
     }
 
@@ -2207,6 +2276,65 @@ mod tests {
             EventOutcome::Completed
         ));
         assert!(interpreter.take_pending().is_empty());
+    }
+
+    #[test]
+    fn sse_interpreter_reports_subagent_task_progress_once_per_state() {
+        let mut interpreter = SseInterpreter::new("ses_1".into());
+        let event = |status: &str| {
+            json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "part": {
+                        "id": "prt_task",
+                        "type": "tool",
+                        "tool": "task",
+                        "state": {
+                            "status": status,
+                            "input": { "subagent_type": "researcher", "description": "查找入口" }
+                        }
+                    }
+                }
+            })
+        };
+        match interpreter.apply(&event("running")) {
+            EventOutcome::Status(message) => {
+                assert_eq!(message, "子 Agent 运行中 · researcher: 查找入口")
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(
+            interpreter.apply(&event("running")),
+            EventOutcome::Ignore
+        ));
+        match interpreter.apply(&event("completed")) {
+            EventOutcome::Status(message) => assert!(message.starts_with("子 Agent 已完成")),
+            other => panic!("unexpected {other:?}"),
+        }
+        // Other tools and child-session events must not surface as sub-agent status.
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "part": { "id": "prt_bash", "type": "tool", "tool": "bash",
+                              "state": { "status": "running" } }
+                }
+            })),
+            EventOutcome::Ignore
+        ));
+        assert!(matches!(
+            interpreter.apply(&json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "sessionID": "ses_child",
+                    "part": { "id": "prt_child", "type": "tool", "tool": "task",
+                              "state": { "status": "running" } }
+                }
+            })),
+            EventOutcome::Ignore
+        ));
     }
 
     #[test]

@@ -47,11 +47,13 @@ my-plugin/
 ## 安装
 
 1. 打开 Moyu Agent。
-2. **设置 → 插件 → 安装插件**。
+2. 侧栏 **插件 → 安装插件**。
 3. 选中含 `plugin.json` 的文件夹。
 4. 勾选启用。
 
 改提示词或 OpenCode 补丁后，**下一次发送任务**才会用新配置。改 `backend.wasm` 后，关掉再打开该插件（或重新安装）才会重新加载。
+
+带设置页的插件用 `get_plugin_settings` / `set_plugin_settings` 读写自己的配置。普通字段落在本地设置里；`apiKey`、`token` 这类密钥进系统凭据库。保存后命令会返回 `applied`，用来核对 MCP、提示词和插件状态是否真的写进去了。
 
 内置插件（随应用提供）不能卸载，只能停用。
 
@@ -65,7 +67,8 @@ my-plugin/
 | 审查模式 | `reviewer` | 先审查再改代码 |
 | 贪吃蛇 | `snake` | 主窗口浮层 + 输入栏徽章 |
 | 测试页 | `lab` | 设置里多一页 |
-| WASM探针 | `probe` | 设置页 + 拦截 `get_engine_status` |
+| WASM探针 | `probe` | 设置页 + 仅拦截带 `probe: true` 的 `get_engine_status` |
+| SPM 记忆 | `spm` | 设置页里开关阶段一 MCP 和阶段二本地裁剪 |
 
 ## 限制
 

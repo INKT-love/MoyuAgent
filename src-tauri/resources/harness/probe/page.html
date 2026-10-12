@@ -70,27 +70,32 @@
   <body>
     <div class="kicker">WASM · BACKEND.WASM</div>
     <h1>WASM 探针</h1>
-    <p>这个插件没有改 Agent 代码。点下面按钮会调用 get_engine_status；若 WASM 已注入，返回里会有 probe: wasm-ok。</p>
+    <p>点「探测 WASM」会带 probe: true 调用 get_engine_status，应返回 probe: wasm-ok。普通健康检查不带这个标记，仍然走真实引擎状态。</p>
     <div class="row">
       <span class="chip">backend.wasm</span>
       <span class="chip">before</span>
       <span class="chip">get_engine_status</span>
     </div>
-    <button type="button" id="probe">探测 WASM</button>
+    <div class="row">
+      <button type="button" id="probe">探测 WASM</button>
+      <button type="button" id="real">读真实引擎状态</button>
+    </div>
     <pre id="out">尚未探测</pre>
     <script>
-      document.getElementById("probe").addEventListener("click", async () => {
+      async function run(args) {
         const out = document.getElementById("out");
         try {
           if (!window.Moyu || typeof window.Moyu.invoke !== "function") {
             throw new Error("Moyu 桥未注入");
           }
-          const result = await window.Moyu.invoke("get_engine_status");
+          const result = await window.Moyu.invoke("get_engine_status", args || {});
           out.textContent = JSON.stringify(result, null, 2);
         } catch (error) {
           out.textContent = String(error);
         }
-      });
+      }
+      document.getElementById("probe").addEventListener("click", () => run({ probe: true }));
+      document.getElementById("real").addEventListener("click", () => run({}));
     </script>
   </body>
 </html>

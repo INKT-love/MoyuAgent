@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-plugin-settings"
+description = "Enables the set_plugin_settings command without any pre-configured scope."
+commands.allow = ["set_plugin_settings"]
+
+[[permission]]
+identifier = "deny-set-plugin-settings"
+description = "Denies the set_plugin_settings command without any pre-configured scope."
+commands.deny = ["set_plugin_settings"]

@@ -26,10 +26,65 @@ export interface PluginInfo {
   hasInstructions: boolean;
   hasUi: boolean;
 }
+export type StoreKind = "plugin" | "skill";
+export type StoreRisk = "low" | "medium" | "high";
+export interface StoreItem {
+  id: string;
+  kind: StoreKind;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  tags: string[];
+  url: string;
+  sha256: string;
+  size?: number | null;
+  installed: boolean;
+  installedVersion?: string | null;
+  updateAvailable: boolean;
+  enabled: boolean;
+}
+export interface SkillInfo {
+  name: string;
+  description: string;
+  enabled: boolean;
+}
+export interface StoreView {
+  url: string;
+  items: StoreItem[];
+  skills: SkillInfo[];
+}
+export interface StoreCapability {
+  risk: StoreRisk;
+  title: string;
+  detail: string;
+}
+export interface StorePreview {
+  token: string;
+  id: string;
+  kind: StoreKind;
+  name: string;
+  version: string;
+  capabilities: StoreCapability[];
+  replaces?: string | null;
+}
 export interface PluginUi {
   id: string;
   name: string;
   html: string;
+}
+export interface PluginApplied {
+  persisted: boolean;
+  instructions: boolean;
+  mcp: boolean;
+  proxy: boolean;
+  details: string[];
+}
+export interface PluginSettingsView {
+  id: string;
+  values: Record<string, unknown>;
+  secrets: Record<string, boolean>;
+  applied: PluginApplied;
 }
 export interface ConfigSummary {
   groupId: number;

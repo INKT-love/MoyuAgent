@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root { font-family: "DM Sans", "Noto Sans SC", system-ui, sans-serif; color: #355a43; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: #fcfdfc; }
+      body { padding: 18px 18px 20px; }
+      .kicker { font-size: 10px; letter-spacing: 0.08em; color: #8a988f; margin-bottom: 6px; }
+      h1 { margin: 0 0 8px; font-size: 16px; font-weight: 600; color: #315941; }
+      p, .hint { margin: 0 0 12px; font-size: 12px; color: #5d7265; line-height: 1.6; }
+      .choice { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; font-size: 12px; color: #355a43; line-height: 1.5; }
+      .choice small { display: block; color: #8a988f; }
+      .field { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px 22px; }
+      .field span { font-size: 11px; color: #526c5b; }
+      select { height: 32px; padding: 0 10px; border: 1px solid #dce4de; border-radius: 8px; background: #fff; color: #315941; font: inherit; font-size: 12px; }
+      select:disabled { opacity: 0.5; }
+      button { height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: #276554; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+      button.secondary { background: #eef3f0; color: #276554; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+      pre { margin: 0; padding: 10px 12px; border-radius: 8px; background: #eef3f0; font-size: 11px; white-space: pre-wrap; color: #5d7265; }
+      .ok { color: #276554; }
+      .warn { color: #9a6b2f; }
+    </style>
+  </head>
+  <body>
+    <div class="kicker">PLUGIN · SUBAGENTS</div>
+    <h1>子 Agent 模型</h1>
+    <p>决定 researcher、code-reviewer 这类子 Agent 使用哪个模型。保存后下一次发送生效。</p>
+
+    <label class="choice">
+      <input type="radio" name="modelMode" value="follow" checked />
+      <span>沿用主对话的模型（默认）<small>主对话用什么模型，子 Agent 就用什么模型，包括之后切换模型。</small></span>
+    </label>
+    <label class="choice">
+      <input type="radio" name="modelMode" value="fixed" />
+      <span>固定使用我选的模型<small>所有子 Agent 都用下面选择的模型。</small></span>
+    </label>
+    <div class="field">
+      <span>子 Agent 模型</span>
+      <select id="model" disabled></select>
+    </div>
+    <label class="choice">
+      <input type="radio" name="modelMode" value="auto" />
+      <span>让模型自己决定<small>为当前分组里的其他模型生成子 Agent 变体，主模型按任务难度自行挑选，最多 5 个。</small></span>
+    </label>
+
+    <div class="row">
+      <button type="button" id="save">保存并检查</button>
+      <button type="button" class="secondary" id="reload">重新读取</button>
+    </div>
+    <pre id="out">尚未读取</pre>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const ID = "subagents";
+      let models = [];
+
+      function mode() {
+        const checked = document.querySelector('input[name="modelMode"]:checked');
+        return checked ? checked.value : "follow";
+      }
+
+      function syncSelect() {
+        $("model").disabled = mode() !== "fixed" || models.length === 0;
+      }
+
+      function fillModels(selected) {
+        const select = $("model");
+        select.textContent = "";
+        const ids = models.map((item) => item.id);
+        if (selected && !ids.includes(selected)) ids.unshift(selected);
+        for (const id of ids) {
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = id;
+          select.appendChild(option);
+        }
+        if (selected) select.value = selected;
+      }
+
+      function show(view, extra) {
+        const details = (view && view.applied && view.applied.details) || [];
+        const lines = [...(extra || []), ...details];
+        $("out").textContent = lines.join("\n") || "没有返回生效信息";
+        $("out").className = lines.some((line) => line.includes("未生效")) ? "warn" : "ok";
+      }
+
+      async function load() {
+        try {
+          if (!window.Moyu || typeof window.Moyu.invoke !== "function") throw new Error("Moyu 桥未注入");
+          const state = await window.Moyu.state();
+          const groupId = state && state.config && state.config.groupId;
+          models = groupId ? await window.Moyu.invoke("get_group_models", { groupId }) : [];
+          const view = await window.Moyu.invoke("get_plugin_settings", { id: ID });
+          const values = view.values || {};
+          const current = ["fixed", "auto"].includes(values.modelMode) ? values.modelMode : "follow";
+          document.querySelector(`input[name="modelMode"][value="${current}"]`).checked = true;
+          fillModels(typeof values.model === "string" ? values.model : (state.config && state.config.model) || "");
+          syncSelect();
+          show(view, groupId ? [] : ["还没有配置模型，先在设置里选择分组和模型"]);
+        } catch (error) {
+          $("out").className = "warn";
+          $("out").textContent = String(error);
+        }
+      }
+
+      async function save() {
+        try {
+          const values = { modelMode: mode() };
+          if (values.modelMode === "fixed") {
+            if (!$("model").value) throw new Error("请先选择一个模型");
+            values.model = $("model").value;
+          }
+          const view = await window.Moyu.invoke("set_plugin_settings", { id: ID, values });
+          show(view);
+        } catch (error) {
+          $("out").className = "warn";
+          $("out").textContent = String(error);
+        }
+      }
+
+      document.querySelectorAll('input[name="modelMode"]').forEach((input) => input.addEventListener("change", syncSelect));
+      $("save").addEventListener("click", save);
+      $("reload").addEventListener("click", load);
+      load();
+    </script>
+  </body>
+</html>

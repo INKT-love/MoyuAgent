@@ -122,7 +122,7 @@ pub fn intercept<R: Runtime>(invoke: Invoke<R>, inner: impl Fn(Invoke<R>) -> boo
         InvokeBody::Raw(_) => return inner(invoke),
     };
     let decision = match ENGINE.lock() {
-        Ok(mut engine) => engine.before(&command, &args),
+        Ok(mut engine) => decide(&command, &args, engine.before(&command, &args)),
         Err(_) => Before::Continue,
     };
     match decision {
@@ -138,9 +138,26 @@ pub fn intercept<R: Runtime>(invoke: Invoke<R>, inner: impl Fn(Invoke<R>) -> boo
     }
 }
 
+fn probe_requested(args: &Value) -> bool {
+    flag(args.get("probe")) || flag(args.pointer("/args/probe"))
+}
+
+fn flag(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_bool) == Some(true)
+}
+
+fn decide(command: &str, args: &Value, decision: Before) -> Before {
+    match decision {
+        Before::Replace(_) if command == "get_engine_status" && !probe_requested(args) => {
+            Before::Continue
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_before, Before, HookOutput, WasmEngine};
+    use super::{decide, parse_before, Before, HookOutput, WasmEngine};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -190,5 +207,28 @@ mod tests {
             engine.before("login", &json!({ "email": "a@b.c" })),
             Before::Continue
         ));
+    }
+
+    #[test]
+    fn engine_status_replace_requires_probe_flag() {
+        let replace = Before::Replace(json!({ "probe": "wasm-ok" }));
+        assert!(matches!(
+            decide("get_engine_status", &json!({}), replace),
+            Before::Continue
+        ));
+        let replace = Before::Replace(json!({ "probe": "wasm-ok" }));
+        match decide("get_engine_status", &json!({ "probe": true }), replace) {
+            Before::Replace(value) => assert_eq!(value["probe"], "wasm-ok"),
+            other => panic!("expected replace, got {other:?}"),
+        }
+        let replace = Before::Replace(json!({ "probe": "wasm-ok" }));
+        match decide(
+            "get_engine_status",
+            &json!({ "args": { "probe": true } }),
+            replace,
+        ) {
+            Before::Replace(value) => assert_eq!(value["probe"], "wasm-ok"),
+            other => panic!("expected replace, got {other:?}"),
+        }
     }
 }

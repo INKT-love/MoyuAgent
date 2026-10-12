@@ -29,10 +29,38 @@ const asAt = (value: string): MixinAt => {
 export const isDocumentHtml = (html: string) =>
   /^\s*(<!doctype|<html)/i.test(html);
 
-const isSettingsPage = (mixin: PluginMixin) => {
-  const select = mixin.select?.trim() ?? "";
-  return select === ".settings-page" || select === ".settings-tabs";
-};
+const isSettingsPage = (mixin: PluginMixin) => mixin.select?.trim() === ".settings-page";
+
+const frameUrls = new Map<string, { html: string; url: string }>();
+
+export function frameSrc(key: string, html: string): string {
+  const bridged = withBridge(html);
+  const cached = frameUrls.get(key);
+  if (cached?.html === bridged) return cached.url;
+  if (cached) URL.revokeObjectURL(cached.url);
+  const url = URL.createObjectURL(new Blob([bridged], { type: "text/html" }));
+  frameUrls.set(key, { html: bridged, url });
+  return url;
+}
+
+/**
+ * Commands that install or change code must go through the store UI's confirmation step,
+ * so plugin pages may not call them through the bridge.
+ */
+const PLUGIN_BLOCKED_COMMANDS = new Set([
+  "store_catalog",
+  "store_set_url",
+  "store_prepare",
+  "store_cancel",
+  "store_install",
+  "list_skills",
+  "set_skill_enabled",
+  "uninstall_skill",
+]);
+
+export function isPluginBlockedCommand(action: string): boolean {
+  return PLUGIN_BLOCKED_COMMANDS.has(action);
+}
 
 const BRIDGE = `(function(){
   if (window.Moyu) return;
@@ -93,6 +121,20 @@ export class MixinRuntime {
         ? data.args
         : {};
     const source = event.source;
+    if (isPluginBlockedCommand(data.action)) {
+      if (source && "postMessage" in source) {
+        (source as Window).postMessage(
+          {
+            source: "moyu-mixin-result",
+            id: data.id,
+            ok: false,
+            error: "插件不能调用商店和技能管理命令",
+          },
+          "*",
+        );
+      }
+      return;
+    }
     const reply = (payload: Record<string, unknown>) => {
       if (source && "postMessage" in source) {
         (source as Window).postMessage(
@@ -198,7 +240,7 @@ export class MixinRuntime {
           if (isDocumentHtml(mixin.html)) {
             const frame = document.createElement("iframe");
             frame.title = mixin.pluginName;
-            frame.srcdoc = withBridge(mixin.html);
+            frame.src = frameSrc(key, mixin.html);
             frame.setAttribute("sandbox", "allow-scripts");
             holder.appendChild(frame);
           } else {
@@ -206,7 +248,6 @@ export class MixinRuntime {
           }
           if (mixin.at === "HEAD") node.insertBefore(holder, node.firstChild);
           else node.appendChild(holder);
-          return;
         }
         if (mixin.script && node instanceof HTMLElement) {
           if (node.dataset.mixinScript === key) return;

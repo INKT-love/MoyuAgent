@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-store-prepare"
+description = "Enables the store_prepare command without any pre-configured scope."
+commands.allow = ["store_prepare"]
+
+[[permission]]
+identifier = "deny-store-prepare"
+description = "Denies the store_prepare command without any pre-configured scope."
+commands.deny = ["store_prepare"]

@@ -1,16 +1,15 @@
 import { For, Show } from "solid-js";
 import { Dynamic } from "solid-js/web";
-import { AppWindow, Globe2, KeyRound, Puzzle } from "lucide-solid";
+import { AppWindow, Globe2, KeyRound } from "lucide-solid";
 import type { AppState, ConfigSummary, Group } from "../lib/api";
 import { folderName } from "../lib/api";
-import { withBridge, type UiInjection } from "../lib/mixin";
+import { frameSrc, type UiInjection } from "../lib/mixin";
 import { EndpointSelect } from "./settings/EndpointSelect";
 import { EndpointTab } from "./settings/EndpointTab";
 import { ModelTab } from "./settings/ModelTab";
-import { PluginsTab } from "./settings/PluginsTab";
 
 export { EndpointSelect };
-export type BuiltinSettingsTab = "endpoint" | "model" | "plugins";
+export type BuiltinSettingsTab = "endpoint" | "model";
 export type SettingsTab = BuiltinSettingsTab | (string & {});
 
 export function pluginSettingsTab(id: string) {
@@ -24,17 +23,15 @@ const TABS: {
 }[] = [
   { id: "endpoint", label: "线路", icon: Globe2 },
   { id: "model", label: "模型", icon: KeyRound },
-  { id: "plugins", label: "插件", icon: Puzzle },
 ];
 
 const DESCRIPTIONS: Record<BuiltinSettingsTab, string> = {
   endpoint: "选择 API 线路",
   model: "选择分组与可用模型",
-  plugins: "安装并组合 Harness 插件",
 };
 
-const isBuiltinTab = (tab: string): tab is BuiltinSettingsTab =>
-  tab === "endpoint" || tab === "model" || tab === "plugins";
+export const isBuiltinSettingsTab = (tab: string): tab is BuiltinSettingsTab =>
+  tab === "endpoint" || tab === "model";
 
 interface Props {
   state: AppState;
@@ -47,7 +44,6 @@ interface Props {
   onEndpoint: (index: number) => Promise<void>;
   onConfigured: (config: ConfigSummary) => void;
   onRefreshGroups: () => Promise<void>;
-  onPluginsChange?: () => void;
 }
 
 export default function Settings(props: Props) {
@@ -60,7 +56,7 @@ export default function Settings(props: Props) {
     })),
   ];
   const description = () =>
-    isBuiltinTab(props.tab)
+    isBuiltinSettingsTab(props.tab)
       ? DESCRIPTIONS[props.tab]
       : "插件混入的设置页";
   const moveTab = (offset: number) => {
@@ -148,12 +144,6 @@ export default function Settings(props: Props) {
           onRefreshGroups={props.onRefreshGroups}
         />
       </Show>
-      <Show when={props.tab === "plugins"}>
-        <PluginsTab
-          streaming={props.streaming}
-          onChange={props.onPluginsChange}
-        />
-      </Show>
       <For each={props.pages}>
         {(page) => (
           <Show when={props.tab === pluginSettingsTab(page.id)}>
@@ -165,7 +155,7 @@ export default function Settings(props: Props) {
             >
               <iframe
                 title={page.name}
-                srcdoc={withBridge(page.html)}
+                src={frameSrc(`settings-${page.id}`, page.html)}
                 sandbox="allow-scripts"
               />
             </section>

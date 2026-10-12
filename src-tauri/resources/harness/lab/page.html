@@ -66,12 +66,23 @@
         font-size: 12px;
         color: #5d7265;
       }
+      input {
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid #dce4de;
+        border-radius: 8px;
+        background: #fff;
+        color: #315941;
+        font: inherit;
+        font-size: 12px;
+        min-width: 180px;
+      }
     </style>
   </head>
   <body>
     <div class="kicker">MIXIN · UI.SETTINGS</div>
     <h1>设置测试页</h1>
-    <p>这个页面由 lab 插件混入设置，用来确认宿主接入点可以长出完整页，而不只是浮层。</p>
+    <p>这个页面由 lab 插件混入设置。计数和备注会写进插件设置，保存后再读应能对上。</p>
     <div class="row">
       <span class="chip">接入点 ui.settings</span>
       <span class="chip">at RETURN</span>
@@ -79,24 +90,62 @@
     <button type="button" id="ping">点一下</button>
     <span class="count">计数 <strong id="n">0</strong></span>
     <div class="row" style="margin-top:16px">
+      <input id="note" type="text" placeholder="备注" />
+      <button type="button" id="save">保存设置</button>
+      <button type="button" id="reload">重新读取</button>
       <button type="button" id="state">读状态</button>
     </div>
     <pre id="out" style="margin:12px 0 0;font-size:11px;white-space:pre-wrap;color:#5d7265"></pre>
     <script>
       let n = 0;
+      const out = document.getElementById("n");
+      const note = document.getElementById("note");
+      const log = document.getElementById("out");
+
+      function show(view) {
+        const values = (view && view.values) || {};
+        n = Number(values.counter) || 0;
+        out.textContent = String(n);
+        note.value = typeof values.note === "string" ? values.note : "";
+        const details = (view.applied && view.applied.details) || [];
+        log.textContent = details.join("\n") || JSON.stringify(view, null, 2);
+      }
+
+      async function load() {
+        try {
+          if (!window.Moyu || typeof window.Moyu.invoke !== "function") {
+            throw new Error("Moyu 桥未注入");
+          }
+          show(await window.Moyu.invoke("get_plugin_settings", { id: "lab" }));
+        } catch (error) {
+          log.textContent = String(error);
+        }
+      }
+
       document.getElementById("ping").addEventListener("click", () => {
         n += 1;
-        document.getElementById("n").textContent = String(n);
+        out.textContent = String(n);
       });
-      document.getElementById("state").addEventListener("click", async () => {
-        const out = document.getElementById("out");
+      document.getElementById("save").addEventListener("click", async () => {
         try {
-          const state = await window.Moyu.invoke("get_app_state");
-          out.textContent = JSON.stringify(state, null, 2);
+          show(await window.Moyu.invoke("set_plugin_settings", {
+            id: "lab",
+            values: { counter: n, note: note.value },
+          }));
         } catch (error) {
-          out.textContent = String(error);
+          log.textContent = String(error);
         }
       });
+      document.getElementById("reload").addEventListener("click", () => load());
+      document.getElementById("state").addEventListener("click", async () => {
+        try {
+          const state = await window.Moyu.invoke("get_app_state");
+          log.textContent = JSON.stringify(state, null, 2);
+        } catch (error) {
+          log.textContent = String(error);
+        }
+      });
+      load();
     </script>
   </body>
 </html>

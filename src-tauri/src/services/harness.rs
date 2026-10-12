@@ -460,7 +460,7 @@ pub async fn apply_to_opencode(
     app: &AppHandle,
     config: &mut Value,
     enabled: &[String],
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, String), String> {
     let loader = write_loader(app).await?;
     let plugins = load_enabled(app, enabled).await?;
     let mut plugin_urls = config
@@ -482,11 +482,7 @@ pub async fn apply_to_opencode(
         }
     }
     config["plugin"] = Value::Array(plugin_urls);
-    let path = instructions_path(app)?;
-    tokio::fs::write(&path, instructions.join("\n\n"))
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(path)
+    Ok((instructions_path(app)?, instructions.join("\n\n")))
 }
 
 pub fn merge_overlay(config: &mut Value, overlay: &Value, plugin_dir: &Path) -> Result<(), String> {
@@ -579,11 +575,24 @@ async fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
         {
             Box::pin(copy_dir(&from, &to)).await?;
         } else {
-            tokio::fs::copy(&from, &to)
-                .await
-                .map_err(|error| error.to_string())?;
+            copy_file_if_changed(&from, &to).await?;
         }
     }
+    Ok(())
+}
+
+async fn copy_file_if_changed(from: &Path, to: &Path) -> Result<(), String> {
+    let source = tokio::fs::read(from)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Ok(existing) = tokio::fs::read(to).await {
+        if existing == source {
+            return Ok(());
+        }
+    }
+    tokio::fs::write(to, source)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -665,6 +674,43 @@ mod tests {
         assert_eq!(value["mixins"][0]["select"], ".settings-page");
     }
 
+    #[test]
+    fn bundled_harness_ships_spm_plugin() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/harness/spm");
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("plugin.json")).unwrap())
+                .unwrap();
+        assert_eq!(value["id"], "spm");
+        assert_eq!(value["mixins"][0]["select"], ".settings-page");
+        assert!(root.join("AGENTS.md").exists());
+        assert!(root.join("index.mjs").exists());
+        assert!(root.join("page.html").exists());
+    }
+
+    #[test]
+    fn bundled_subagents_plugin_defines_read_only_subagents() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/harness/subagents");
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("plugin.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["id"], "subagents");
+        assert!(root.join("AGENTS.md").exists());
+        let overlay: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("opencode.patch.json")).unwrap(),
+        )
+        .unwrap();
+        let mut config = json!({ "model": "sub2api/keep" });
+        merge_overlay(&mut config, &overlay, &root).unwrap();
+        for name in ["researcher", "code-reviewer"] {
+            let agent = &config["agent"][name];
+            assert_eq!(agent["mode"], "subagent");
+            assert_eq!(agent["permission"]["edit"], "deny");
+            assert_eq!(agent["permission"]["bash"], "deny");
+            assert!(agent.get("model").is_none());
+        }
+        assert_eq!(config["model"], "sub2api/keep");
+    }
+
     #[tokio::test]
     async fn resolve_mixins_reads_html_and_rejects_bad_targets() {
         let directory = tempfile::tempdir().unwrap();
@@ -729,5 +775,37 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn copy_dir_skips_identical_files() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        tokio::fs::write(source.path().join("a.txt"), "hello")
+            .await
+            .unwrap();
+        tokio::fs::write(dest.path().join("a.txt"), "hello")
+            .await
+            .unwrap();
+        let before = tokio::fs::metadata(dest.path().join("a.txt"))
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
+        copy_dir(source.path(), dest.path()).await.unwrap();
+        let after = tokio::fs::metadata(dest.path().join("a.txt"))
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
+        tokio::fs::write(source.path().join("a.txt"), "changed")
+            .await
+            .unwrap();
+        copy_dir(source.path(), dest.path()).await.unwrap();
+        let text = tokio::fs::read_to_string(dest.path().join("a.txt"))
+            .await
+            .unwrap();
+        assert_eq!(text, "changed");
     }
 }

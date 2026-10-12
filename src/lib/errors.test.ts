@@ -42,5 +42,9 @@ describe("localizeError", () => {
       message: "本地引擎报告了一条错误。",
       original: "OpenCode reported an error",
     });
+    expect(localizeError("Plugin settings must be an object")).toEqual({
+      message: "插件设置必须是对象。",
+      original: "Plugin settings must be an object",
+    });
   });
 });

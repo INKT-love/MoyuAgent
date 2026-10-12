@@ -29,7 +29,7 @@
 
 ## 用 Rust 写
 
-仓库里的探针源码在 `wasm-plugins/probe/`，可以当模板。
+下面这段可以当模板；打包好的探针在 `src-tauri/resources/harness/probe/backend.wasm`。
 
 ```rust
 use extism_pdk::*;
@@ -97,6 +97,6 @@ cargo build --target wasm32-unknown-unknown --release
 
 ## 怎么验收
 
-启用「WASM探针」后打开对应设置页，点「探测 WASM」，应看到 `"probe": "wasm-ok"`。它只替换 `get_engine_status`，不会动登录和发送。
+启用「WASM探针」后打开对应设置页，点「探测 WASM」，应看到 `"probe": "wasm-ok"`。宿主只在参数带 `probe: true` 时接受这次替换；普通的 `get_engine_status` 仍返回真实引擎状态。它不会动登录和发送。
 
 替换 `get_app_state`、`login`、`start_stream` 时，必须返回界面期望的完整结构，否则页面会坏。

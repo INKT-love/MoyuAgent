@@ -31,6 +31,8 @@ import {
   Pencil,
   Pin,
   Plus,
+  Puzzle,
+  Store,
   RotateCw,
   Settings2,
   Shield,
@@ -44,8 +46,11 @@ import { ErrorNotice } from "./components/ErrorNotice";
 import { ModelPicker } from "./components/ModelPicker";
 import { PermissionPicker } from "./components/PermissionPicker";
 import { ReasoningPicker } from "./components/ReasoningPicker";
+import { PluginsPage } from "./components/PluginsPage";
+import { StorePage } from "./components/StorePage";
 import Settings, {
   EndpointSelect,
+  isBuiltinSettingsTab,
   pluginSettingsTab,
   type SettingsTab,
 } from "./components/Settings";
@@ -80,8 +85,8 @@ import {
   type WorkspaceActionResult,
 } from "./lib/api";
 import {
+  frameSrc,
   mixins,
-  withBridge,
   type PluginMixin,
   type UiInjection,
 } from "./lib/mixin";
@@ -120,7 +125,7 @@ const newConversation = (workspace = ""): Conversation => ({
 export default function App() {
   const [state, setState] = createSignal<AppState>(initialState);
   const [initializing, setInitializing] = createSignal(desktop);
-  const [view, setView] = createSignal<"chat" | "settings">("chat");
+  const [view, setView] = createSignal<"chat" | "settings" | "plugins" | "store">("chat");
   const [settingsTab, setSettingsTab] = createSignal<SettingsTab>("model");
   const [preview, setPreview] = createSignal(false);
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
@@ -446,12 +451,10 @@ export default function App() {
       setMainMixins(mixins.overlays());
       setSettingsMixins(pages);
       setSettingsTab((tab) =>
-        tab === "endpoint" ||
-        tab === "model" ||
-        tab === "plugins" ||
+        isBuiltinSettingsTab(tab) ||
         pages.some((page) => pluginSettingsTab(page.id) === tab)
           ? tab
-          : "plugins",
+          : "model",
       );
       mixins.applyDom();
     } catch {
@@ -1259,6 +1262,26 @@ export default function App() {
             对话
           </button>
           <button
+            classList={{ "nav-button": true, active: view() === "plugins" }}
+            onClick={() => {
+              setView("plugins");
+              setSidebarOpen(false);
+            }}
+          >
+            <Puzzle size={17} />
+            插件
+          </button>
+          <button
+            classList={{ "nav-button": true, active: view() === "store" }}
+            onClick={() => {
+              setView("store");
+              setSidebarOpen(false);
+            }}
+          >
+            <Store size={17} />
+            商店
+          </button>
+          <button
             classList={{ "nav-button": true, active: view() === "settings" }}
             onClick={() => {
               setView("settings");
@@ -1641,7 +1664,11 @@ export default function App() {
               <strong>
                 {view() === "settings"
                   ? "设置"
-                  : conversation().messages.length
+                  : view() === "plugins"
+                    ? "插件"
+                    : view() === "store"
+                      ? "商店"
+                      : conversation().messages.length
                     ? conversation().title
                     : "新任务"}
               </strong>
@@ -1705,7 +1732,7 @@ export default function App() {
           }
         >
           <Show
-            when={view() === "settings"}
+            when={view() !== "chat"}
             fallback={
               <Show
                 when={state().authenticated || preview()}
@@ -2239,21 +2266,44 @@ export default function App() {
               </Show>
             }
           >
-            <Settings
-              state={state()}
-              groups={groups()}
-              busy={busy() || workspaceBusy()}
-              streaming={workspaceBusy()}
-              tab={settingsTab()}
-              pages={settingsMixins()}
-              onTab={setSettingsTab}
-              onEndpoint={switchEndpoint}
-              onConfigured={(config) =>
-                setState((current) => ({ ...current, config }))
+            <Show
+              when={view() === "settings"}
+              fallback={
+                <Show
+                  when={view() === "store"}
+                  fallback={
+                    <PluginsPage
+                      streaming={workspaceBusy()}
+                      settingsPageIds={settingsMixins().map((page) => page.id)}
+                      onChange={() => void refreshMixins()}
+                      onOpenPluginSettings={(id) =>
+                        openSettings(pluginSettingsTab(id))
+                      }
+                    />
+                  }
+                >
+                  <StorePage
+                    streaming={workspaceBusy()}
+                    onChange={() => void refreshMixins()}
+                  />
+                </Show>
               }
-              onRefreshGroups={refreshGroups}
-              onPluginsChange={() => void refreshMixins()}
-            />
+            >
+              <Settings
+                state={state()}
+                groups={groups()}
+                busy={busy() || workspaceBusy()}
+                streaming={workspaceBusy()}
+                tab={settingsTab()}
+                pages={settingsMixins()}
+                onTab={setSettingsTab}
+                onEndpoint={switchEndpoint}
+                onConfigured={(config) =>
+                  setState((current) => ({ ...current, config }))
+                }
+                onRefreshGroups={refreshGroups}
+              />
+            </Show>
           </Show>
         </Show>
       </main>
@@ -2295,7 +2345,7 @@ export default function App() {
                   </header>
                   <iframe
                     title={plugin.name}
-                    srcdoc={withBridge(plugin.html)}
+                    src={frameSrc(`overlay-${plugin.id}`, plugin.html)}
                     sandbox="allow-scripts"
                   />
                 </section>

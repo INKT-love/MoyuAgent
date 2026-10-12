@@ -31,7 +31,7 @@
 | `start_stream` | `requestId`, `prompt`, `sessionId`，`workspace`（可选），`onEvent` | 开始一次 Agent 任务。可与其他会话并行；`workspace` 指定该会话工作区，省略则用当前配置。同一会话不能重复跑 |
 | `ack_stream` | `requestId`, `sequence` | 流式确认 |
 | `cancel_stream` | `requestId` | 只停止这一次生成，不影响其他会话 |
-| `get_engine_status` | 无 | 引擎是否可用、所有工作区进行中的请求数。每个工作区常驻一个 OpenCode；空闲进程才在改模型/插件/线路时重启 |
+| `get_engine_status` | `probe`（可选） | 引擎是否可用、所有工作区进行中的请求数。每个工作区常驻一个 OpenCode；空闲进程才在改模型/插件/线路时重启。WASM 探针只有在 `probe: true` 时才会替换这次返回 |
 | `list_conversations` | 无 | 读取当前账户保存在本地的对话。按账户隔离；未完成的流式回复会标成已停止 |
 | `save_conversations` | `history`（`activeId`、`conversations`） | 把当前账户的对话写到本地 `conversations.json`。工作区列表仍在设置里，聊天记录单独存 |
 
@@ -47,8 +47,25 @@
 | `uninstall_plugin` | `id` | 卸载（内置插件不行） |
 | `list_plugin_uis` | 无 | 已启用插件的界面 HTML |
 | `list_plugin_mixins` | 无 | 已启用插件的 mixins |
+| `get_plugin_settings` | `id` | 读取该插件的设置、密钥是否已保存，以及当前是否已写进引擎 |
+| `set_plugin_settings` | `id`，`values`，`secrets`（可选） | 保存插件设置。密钥只接受字符串；空字符串或 `null` 表示删除。返回值与 `get_plugin_settings` 相同，可用来核对是否生效 |
 
 拦截插件管理相关命令可能让设置页无法使用。
+
+## 商店与技能
+
+下面这些命令只给应用自己的界面用，**插件页面通过 `Moyu.invoke` 调它们会被拒绝**，这样插件不能绕过安装确认。
+
+| 命令 | 参数 | 做什么 |
+| --- | --- | --- |
+| `store_catalog` | 无 | 拉取商店目录，返回条目、是否已安装、是否有更新，以及已装技能 |
+| `store_set_url` | `url` | 保存商店地址，只接受 https；空字符串恢复默认 |
+| `store_prepare` | `kind`（`plugin` / `skill`），`id` | 下载安装包并校验 SHA-256，解压到暂存区，返回从包里读出的能力清单和一次性 `token`。此时什么都还没安装 |
+| `store_cancel` | `token` | 丢弃暂存的安装包 |
+| `store_install` | `token` | 用户确认后落盘并刷新 Agent 配置 |
+| `list_skills` | 无 | 已安装的技能 |
+| `set_skill_enabled` | `name`，`enabled` | 启用或停用技能（停用只加拒绝规则，不删文件） |
+| `uninstall_skill` | `name` | 删除技能 |
 
 ## 权限
 

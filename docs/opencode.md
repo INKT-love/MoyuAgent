@@ -2,7 +2,9 @@
 
 用来改对话时 Agent 的提示词、工具和 OpenCode 配置。不走界面 mixin，也不走 `backend.wasm`。
 
-启用或停用带这些文件的插件后，**下一次发送**才生效。
+启用或停用带这些文件的插件后，**下一次发送**才生效。插件设置页保存后，宿主会立刻重写 `opencode.json` 和 `harness-instructions.md`，空闲引擎会重启。
+
+SPM 的 MCP 由宿主写入 `mcp.spm`，密钥走 `{env:MOYU_PLUGIN_SPM_API_KEY}`，不会改 Sub2API 的 `provider`。阶段二把 `proxyEnabled` 写进插件状态，由该插件的 `index.mjs` 裁剪较早轮次的文本。
 
 ## AGENTS.md
 

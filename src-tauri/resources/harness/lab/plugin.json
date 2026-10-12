@@ -1,8 +1,8 @@
 {
   "id": "lab",
   "name": "测试页",
-  "description": "对着 .settings-page 混入一个设置页，不必登记注入点。",
-  "version": "0.1.0",
+  "description": "对着 .settings-page 混入一个设置页，并把计数写进插件设置。",
+  "version": "0.1.1",
   "mixins": [
     { "select": ".settings-page", "html": "page.html" }
   ]

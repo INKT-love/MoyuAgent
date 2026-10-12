@@ -1,0 +1,9 @@
+{
+  "id": "subagents",
+  "name": "子 Agent",
+  "description": "允许主 Agent 把调研、审查等独立任务委派给只读子 Agent,可选择沿用主模型、固定模型或由模型自己决定。",
+  "version": "0.2.0",
+  "mixins": [
+    { "select": ".settings-page", "html": "page.html" }
+  ]
+}

@@ -40,7 +40,17 @@ pub struct Preferences {
     #[serde(default)]
     pub enabled_plugins: Vec<String>,
     #[serde(default)]
+    pub plugin_settings: HashMap<String, HashMap<String, Value>>,
+    #[serde(default)]
+    pub plugin_secret_names: HashMap<String, HashMap<String, Vec<String>>>,
+    #[serde(default)]
     pub catalog: Option<Catalog>,
+    /// Skills the user switched off. Installed skills are on by default.
+    #[serde(default)]
+    pub disabled_skills: Vec<String>,
+    /// Catalog address for the plugin and skill store; empty means the built-in default.
+    #[serde(default)]
+    pub store_url: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -264,16 +274,49 @@ pub async fn write_opencode_config(
     config: &ConfigSummary,
     base_url: &str,
     enabled_plugins: &[String],
+    plugin_values: &HashMap<String, Value>,
+    has_spm_key: bool,
+    available_models: &[String],
+    disabled_skills: &[String],
 ) -> Result<Value, String> {
     let bridge = write_bridge(app).await?;
     let mut content = opencode_config(config, base_url, &bridge)?;
-    super::harness::apply_to_opencode(app, &mut content, enabled_plugins).await?;
+    let (instructions_file, mut instructions) =
+        super::harness::apply_to_opencode(app, &mut content, enabled_plugins).await?;
+    super::plugin_settings::apply_runtime(
+        &mut content,
+        &mut instructions,
+        enabled_plugins,
+        plugin_values,
+        has_spm_key,
+    );
+    super::plugin_settings::apply_subagent_models(
+        &mut content,
+        &mut instructions,
+        enabled_plugins,
+        plugin_values,
+        available_models,
+    );
+    let skills_root = super::skills::skills_dir(app)?;
+    tokio::fs::create_dir_all(&skills_root)
+        .await
+        .map_err(|error| error.to_string())?;
+    super::skills::apply_to_config(&mut content, &skills_root, disabled_skills);
+    tokio::fs::write(&instructions_file, instructions)
+        .await
+        .map_err(|error| error.to_string())?;
     tokio::fs::write(
         &config.config_path,
         serde_json::to_vec_pretty(&content).map_err(|e| e.to_string())?,
     )
     .await
     .map_err(|e| format!("Cannot write OpenCode configuration: {e}"))?;
+    super::plugin_settings::write_state_files(
+        &super::plugin_settings::state_dir(app)?,
+        enabled_plugins,
+        plugin_values,
+    )
+    .await?;
     Ok(content)
 }
 

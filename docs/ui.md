@@ -66,7 +66,7 @@
 { "select": ".composer-context", "html": "badge.html" }
 ```
 
-**完整文档**（以 `<!doctype` 或 `<html` 开头）放进 iframe。
+**完整文档**（以 `<!doctype` 或 `<html` 开头）放进沙箱 iframe，地址是 blob URL。设置页只认 `"select": ".settings-page"`。`html` 和 `script` 可以写在同一条 mixin 上，插入 HTML 后仍会执行脚本。
 
 浮层：
 

@@ -9,6 +9,10 @@ use services::{
     harness::{self, PluginInfo, PluginMixin, PluginUi},
     history::{self, HistorySnapshot},
     opencode::{Engine, EngineHealth, RunEnvironment, RunRequest},
+    plugin_settings::{self, PluginSettingsView},
+    skills::{self, SkillInfo},
+    store::{self, CatalogItem, Inspection, Kind},
+    store_client,
     stream::StreamEvent,
     wasm_ipc,
 };
@@ -29,6 +33,14 @@ struct Services {
     user: Mutex<Option<User>>,
     engines: EnginePool,
     mutation: Mutex<()>,
+    /// Downloaded and verified packages waiting for the user's confirmation, by token.
+    staged: Mutex<HashMap<String, StagedPackage>>,
+}
+
+struct StagedPackage {
+    directory: std::path::PathBuf,
+    kind: Kind,
+    id: String,
 }
 
 impl AppState {
@@ -37,6 +49,10 @@ impl AppState {
             .get_or_try_init(|| async {
                 let preferences = config::load(app).await?;
                 harness::seed_bundled(app).await?;
+                // Packages downloaded but never confirmed (crash, closed dialog) are leftovers.
+                if let Ok(root) = config::app_directory(app) {
+                    let _ = tokio::fs::remove_dir_all(root.join("store-staging")).await;
+                }
                 wasm_ipc::reload(app, &preferences.enabled_plugins).await?;
                 let api = Arc::new(ApiClient::new(preferences.endpoint_index.min(1))?);
                 Ok(Services {
@@ -46,6 +62,7 @@ impl AppState {
                     user: Mutex::new(None),
                     engines: EnginePool::new(),
                     mutation: Mutex::new(()),
+                    staged: Mutex::new(HashMap::new()),
                 })
             })
             .await
@@ -92,15 +109,78 @@ impl Services {
         Ok(())
     }
 
+    async fn plugin_runtime(
+        &self,
+        app: &AppHandle,
+        user_id: i64,
+    ) -> Result<
+        (
+            Vec<String>,
+            HashMap<String, serde_json::Value>,
+            Vec<(String, String)>,
+            bool,
+        ),
+        String,
+    > {
+        let prefs = self.preferences.lock().await;
+        let (enabled, settings, names) = plugin_settings::collect(&prefs, user_id);
+        drop(prefs);
+        let secrets = plugin_settings::load_secrets(user_id, &enabled, &names).await;
+        let extra_env = plugin_settings::extra_env(
+            &enabled,
+            &settings,
+            &secrets,
+            &plugin_settings::state_dir(app)?,
+        );
+        let has_spm_key = secrets.contains_key("spm.apiKey");
+        Ok((enabled, settings, extra_env, has_spm_key))
+    }
+
     async fn write_agent_config(
         &self,
         app: &AppHandle,
         summary: &ConfigSummary,
         base_url: &str,
     ) -> Result<(), String> {
-        let enabled = self.preferences.lock().await.enabled_plugins.clone();
-        config::write_opencode_config(app, summary, base_url, &enabled).await?;
+        let (enabled, settings, _, has_spm_key) = self.plugin_runtime(app, summary.user_id).await?;
+        let (available, disabled_skills): (Vec<String>, Vec<String>) = {
+            let prefs = self.preferences.lock().await;
+            (
+                prefs
+                    .models_for(summary.user_id, summary.group_id)
+                    .map(|models| models.iter().map(|model| model.id.clone()).collect())
+                    .unwrap_or_default(),
+                prefs.disabled_skills.clone(),
+            )
+        };
+        config::write_opencode_config(
+            app,
+            summary,
+            base_url,
+            &enabled,
+            &settings,
+            has_spm_key,
+            &available,
+            &disabled_skills,
+        )
+        .await?;
         Ok(())
+    }
+
+    fn run_environment(
+        summary: &ConfigSummary,
+        api_key: String,
+        extra_env: Vec<(String, String)>,
+    ) -> RunEnvironment {
+        RunEnvironment {
+            config_path: summary.config_path.clone().into(),
+            api_key,
+            model: Some(format!("sub2api/{}", summary.model)),
+            reasoning_effort: Some(config::normalize_reasoning_effort(Some(
+                &summary.reasoning_effort,
+            ))),
+            extra_env,
+        }
     }
 
     async fn engine(&self, app: &AppHandle, config: &ConfigSummary) -> Result<Arc<Engine>, String> {
@@ -144,15 +224,14 @@ impl Services {
         if engine.health().await.active_requests > 0 {
             return;
         }
+        let extra_env = self
+            .plugin_runtime(app, user.id)
+            .await
+            .ok()
+            .map(|runtime| runtime.2)
+            .unwrap_or_default();
         if let Err(error) = engine
-            .ensure_server(&RunEnvironment {
-                config_path: summary.config_path.into(),
-                api_key: key,
-                model: Some(format!("sub2api/{}", summary.model)),
-                reasoning_effort: Some(config::normalize_reasoning_effort(Some(
-                    &summary.reasoning_effort,
-                ))),
-            })
+            .ensure_server(&Self::run_environment(&summary, key, extra_env))
             .await
         {
             tracing::warn!(%error, "OpenCode server did not start with the application");
@@ -456,10 +535,9 @@ async fn configure(
     }
     let directory = config::working_directory(&app, workspace).await?;
     let _api_key = zeroize::Zeroizing::new(services.auth.ensure_api_key(group.id, user.id).await?);
-    let (enabled, previous, previous_effort, previous_permission) = {
+    let (previous, previous_effort, previous_permission) = {
         let prefs = services.preferences.lock().await;
         (
-            prefs.enabled_plugins.clone(),
             prefs.config.clone(),
             prefs
                 .config
@@ -491,13 +569,9 @@ async fn configure(
                 .or(previous_permission.as_deref()),
         ),
     };
-    config::write_opencode_config(
-        &app,
-        &summary,
-        services.api.get_current_base_url(),
-        &enabled,
-    )
-    .await?;
+    services
+        .write_agent_config(&app, &summary, services.api.get_current_base_url())
+        .await?;
     let mut prefs = services.preferences.lock().await;
     prefs.config = Some(summary.clone());
     prefs.endpoint_index = services.api.endpoint().index;
@@ -750,11 +824,21 @@ async fn uninstall_plugin(
     let services = state.services(&app).await?;
     harness::uninstall(&app, &id).await?;
     let mut prefs = services.preferences.lock().await;
+    let secret_map = prefs.plugin_secret_names.clone();
     prefs.enabled_plugins.retain(|item| item != &id);
+    plugin_settings::remove_plugin(&mut prefs, &id);
     let enabled = prefs.enabled_plugins.clone();
     let summary = prefs.config.clone();
     config::save(&app, prefs.clone()).await?;
     drop(prefs);
+    for (user_key, plugins) in secret_map {
+        if let (Ok(user_id), Some(names)) = (user_key.parse::<i64>(), plugins.get(&id)) {
+            plugin_settings::delete_secrets(user_id, &id, names).await;
+        }
+    }
+    if let Ok(directory) = plugin_settings::state_dir(&app) {
+        let _ = tokio::fs::remove_file(directory.join(format!("{id}.json"))).await;
+    }
     if let Some(summary) = summary {
         services
             .write_agent_config(&app, &summary, services.api.get_current_base_url())
@@ -764,6 +848,299 @@ async fn uninstall_plugin(
     }
     wasm_ipc::reload(&app, &enabled).await?;
     harness::list_plugins(&app, &enabled).await
+}
+
+const DEFAULT_STORE_URL: &str = "https://store.moyu.app/index.json";
+const MAX_STAGED: usize = 8;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoreItemView {
+    #[serde(flatten)]
+    item: CatalogItem,
+    installed: bool,
+    installed_version: Option<String>,
+    update_available: bool,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoreView {
+    url: String,
+    items: Vec<StoreItemView>,
+    skills: Vec<SkillInfo>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorePreview {
+    token: String,
+    #[serde(flatten)]
+    inspection: Inspection,
+    replaces: Option<String>,
+}
+
+fn store_address(prefs: &Preferences) -> String {
+    let value = prefs.store_url.trim();
+    if value.is_empty() { DEFAULT_STORE_URL.to_owned() } else { value.to_owned() }
+}
+
+async fn store_staging_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let directory = config::app_directory(app)?.join("store-staging");
+    tokio::fs::create_dir_all(&directory).await.map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+
+async fn build_store_view(
+    app: &AppHandle,
+    services: &Services,
+    url: String,
+    items: Vec<CatalogItem>,
+) -> Result<StoreView, String> {
+    let (enabled_plugins, disabled_skills) = {
+        let prefs = services.preferences.lock().await;
+        (prefs.enabled_plugins.clone(), prefs.disabled_skills.clone())
+    };
+    let plugins = harness::list_plugins(app, &enabled_plugins).await?;
+    let skills = skills::list(&skills::skills_dir(app)?, &disabled_skills).await;
+    let items = items
+        .into_iter()
+        .map(|item| {
+            let (installed_version, enabled) = match item.kind {
+                Kind::Plugin => plugins
+                    .iter()
+                    .find(|plugin| plugin.id == item.id && !plugin.bundled)
+                    .map(|plugin| (Some(plugin.version.clone()), plugin.enabled))
+                    .unwrap_or((None, false)),
+                // Skills carry no version of their own; the catalog version is recorded at install.
+                Kind::Skill => skills
+                    .iter()
+                    .find(|skill| skill.name == item.id)
+                    .map(|skill| (Some(String::new()), skill.enabled))
+                    .unwrap_or((None, false)),
+            };
+            let update_available = installed_version
+                .as_deref()
+                .is_some_and(|version| !version.is_empty() && store::is_newer(version, &item.version));
+            StoreItemView {
+                installed: installed_version.is_some(),
+                installed_version: installed_version.filter(|version| !version.is_empty()),
+                update_available,
+                enabled,
+                item,
+            }
+        })
+        .collect();
+    Ok(StoreView { url, items, skills })
+}
+
+#[tauri::command]
+async fn store_catalog(app: AppHandle, state: State<'_, AppState>) -> Result<StoreView, String> {
+    let services = state.services(&app).await?;
+    let url = store_address(&*services.preferences.lock().await);
+    let parsed = store::parse_catalog_url(&url)?;
+    let items = store_client::fetch_catalog(&store_client::client()?, &parsed).await?;
+    build_store_view(&app, services, url, items).await
+}
+
+#[tauri::command]
+async fn store_set_url(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<String, String> {
+    let trimmed = url.trim();
+    if !trimmed.is_empty() {
+        store::parse_catalog_url(trimmed)?;
+    }
+    let services = state.services(&app).await?;
+    let mut prefs = services.preferences.lock().await;
+    prefs.store_url = trimmed.to_owned();
+    config::save(&app, prefs.clone()).await?;
+    Ok(store_address(&prefs))
+}
+
+/// Step one: download, verify and inspect. Nothing is installed until `store_install`.
+#[tauri::command]
+async fn store_prepare(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: Kind,
+    id: String,
+) -> Result<StorePreview, String> {
+    if !store::valid_id(kind, &id) {
+        return Err("名称不合法".into());
+    }
+    let services = state.services(&app).await?;
+    let url = store_address(&*services.preferences.lock().await);
+    let client = store_client::client()?;
+    let catalog = store::parse_catalog_url(&url)?;
+    let items = store_client::fetch_catalog(&client, &catalog).await?;
+    let item = items
+        .into_iter()
+        .find(|item| item.kind == kind && item.id == id)
+        .ok_or("商店目录里没有这个条目")?;
+    let staging = store_staging_dir(&app).await?;
+    let staged = store_client::stage(&client, &item, &staging).await?;
+    let replaces = match kind {
+        Kind::Plugin => harness::plugins_dir(&app)?.join(&id).exists().then(|| id.clone()),
+        Kind::Skill => skills::skills_dir(&app)?.join(&id).exists().then(|| id.clone()),
+    };
+    if kind == Kind::Plugin
+        && harness::bundled_plugins_root(&app).is_some_and(|root| root.join(&id).exists())
+    {
+        let _ = tokio::fs::remove_dir_all(&staged.directory).await;
+        return Err("这个名称属于内置插件，不能用商店里的同名包替换".into());
+    }
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let mut pending = services.staged.lock().await;
+    while pending.len() >= MAX_STAGED {
+        let Some(oldest) = pending.keys().next().cloned() else { break };
+        if let Some(old) = pending.remove(&oldest) {
+            let _ = tokio::fs::remove_dir_all(&old.directory).await;
+        }
+    }
+    pending.insert(
+        token.clone(),
+        StagedPackage { directory: staged.directory, kind, id },
+    );
+    Ok(StorePreview { token, inspection: staged.inspection, replaces })
+}
+
+#[tauri::command]
+async fn store_cancel(state: State<'_, AppState>, app: AppHandle, token: String) -> Result<(), String> {
+    let services = state.services(&app).await?;
+    if let Some(staged) = services.staged.lock().await.remove(&token) {
+        let _ = tokio::fs::remove_dir_all(&staged.directory).await;
+    }
+    Ok(())
+}
+
+async fn apply_agent_changes(app: &AppHandle, services: &Services, enabled: &[String]) -> Result<(), String> {
+    let summary = services.preferences.lock().await.config.clone();
+    if let Some(summary) = summary {
+        services
+            .write_agent_config(app, &summary, services.api.get_current_base_url())
+            .await?;
+        services.engines.shutdown_idle().await;
+        spawn_boot(app.clone());
+    }
+    wasm_ipc::reload(app, enabled).await
+}
+
+/// Step two: move the confirmed package into place and refresh the agent configuration.
+#[tauri::command]
+async fn store_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: String,
+) -> Result<StoreView, String> {
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let staged = services
+        .staged
+        .lock()
+        .await
+        .remove(&token)
+        .ok_or("安装确认已过期，请重新点击安装")?;
+    let result = async {
+        match staged.kind {
+            Kind::Plugin => {
+                let id = harness::install_from_directory(&app, &staged.directory).await?;
+                let mut prefs = services.preferences.lock().await;
+                if !prefs.enabled_plugins.contains(&id) {
+                    prefs.enabled_plugins.push(id);
+                }
+                config::save(&app, prefs.clone()).await
+            }
+            Kind::Skill => {
+                let destination = skills::skills_dir(&app)?.join(&staged.id);
+                if let Some(parent) = destination.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+                }
+                if destination.exists() {
+                    tokio::fs::remove_dir_all(&destination).await.map_err(|error| error.to_string())?;
+                }
+                tokio::fs::rename(&staged.directory, &destination)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let mut prefs = services.preferences.lock().await;
+                prefs.disabled_skills.retain(|name| name != &staged.id);
+                config::save(&app, prefs.clone()).await
+            }
+        }
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(&staged.directory).await;
+    result?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    apply_agent_changes(&app, services, &enabled).await?;
+    let url = store_address(&*services.preferences.lock().await);
+    let items = store_client::fetch_catalog(&store_client::client()?, &store::parse_catalog_url(&url)?)
+        .await
+        .unwrap_or_default();
+    build_store_view(&app, services, url, items).await
+}
+
+#[tauri::command]
+async fn set_skill_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    enabled: bool,
+) -> Result<Vec<SkillInfo>, String> {
+    if !store::valid_skill_name(&name) {
+        return Err("名称不合法".into());
+    }
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let disabled = {
+        let mut prefs = services.preferences.lock().await;
+        prefs.disabled_skills.retain(|item| item != &name);
+        if !enabled {
+            prefs.disabled_skills.push(name);
+        }
+        config::save(&app, prefs.clone()).await?;
+        prefs.disabled_skills.clone()
+    };
+    let plugins = services.preferences.lock().await.enabled_plugins.clone();
+    apply_agent_changes(&app, services, &plugins).await?;
+    Ok(skills::list(&skills::skills_dir(&app)?, &disabled).await)
+}
+
+#[tauri::command]
+async fn uninstall_skill(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Vec<SkillInfo>, String> {
+    if !store::valid_skill_name(&name) {
+        return Err("名称不合法".into());
+    }
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let directory = skills::skills_dir(&app)?.join(&name);
+    if directory.exists() {
+        tokio::fs::remove_dir_all(&directory).await.map_err(|error| error.to_string())?;
+    }
+    let disabled = {
+        let mut prefs = services.preferences.lock().await;
+        prefs.disabled_skills.retain(|item| item != &name);
+        config::save(&app, prefs.clone()).await?;
+        prefs.disabled_skills.clone()
+    };
+    let plugins = services.preferences.lock().await.enabled_plugins.clone();
+    apply_agent_changes(&app, services, &plugins).await?;
+    Ok(skills::list(&skills::skills_dir(&app)?, &disabled).await)
+}
+
+#[tauri::command]
+async fn list_skills(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SkillInfo>, String> {
+    let services = state.services(&app).await?;
+    let disabled = services.preferences.lock().await.disabled_skills.clone();
+    Ok(skills::list(&skills::skills_dir(&app)?, &disabled).await)
 }
 
 #[tauri::command]
@@ -784,6 +1161,113 @@ async fn list_plugin_mixins(
     let services = state.services(&app).await?;
     let enabled = services.preferences.lock().await.enabled_plugins.clone();
     harness::list_plugin_mixins(&app, &enabled).await
+}
+
+async fn plugin_settings_view(
+    app: &AppHandle,
+    services: &Services,
+    user_id: i64,
+    plugin_id: &str,
+) -> Result<PluginSettingsView, String> {
+    let prefs = services.preferences.lock().await;
+    let enabled = prefs.enabled_plugins.iter().any(|item| item == plugin_id);
+    let values = plugin_settings::settings_for(&prefs, user_id, plugin_id);
+    let names = plugin_settings::secret_names_for(&prefs, user_id, plugin_id);
+    let config_path = prefs
+        .config
+        .as_ref()
+        .filter(|config| config.user_id == user_id)
+        .map(|config| config.config_path.clone());
+    drop(prefs);
+    let secrets = plugin_settings::secret_presence(user_id, plugin_id, &names).await;
+    let has_secret = secrets.values().copied().any(|present| present);
+    let config = match config_path {
+        Some(path) => plugin_settings::read_json_file(std::path::Path::new(&path)).await,
+        None => None,
+    };
+    let instructions =
+        plugin_settings::read_text_file(&harness::instructions_path(app)?).await;
+    let state = plugin_settings::read_json_file(
+        &plugin_settings::state_dir(app)?.join(format!("{plugin_id}.json")),
+    )
+    .await;
+    Ok(PluginSettingsView {
+        id: plugin_id.to_owned(),
+        values: values.clone(),
+        secrets,
+        applied: plugin_settings::inspect_applied(
+            plugin_id,
+            enabled,
+            &values,
+            has_secret,
+            config.as_ref(),
+            &instructions,
+            state.as_ref(),
+        ),
+    })
+}
+
+#[tauri::command]
+async fn get_plugin_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<PluginSettingsView, String> {
+    if !harness::valid_plugin_id(&id) {
+        return Err("Invalid plugin id".into());
+    }
+    let services = state.services(&app).await?;
+    let user = services.require_user("查看插件设置").await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    let plugins = harness::list_plugins(&app, &enabled).await?;
+    if !plugins.iter().any(|plugin| plugin.id == id) {
+        return Err("Plugin not found".into());
+    }
+    plugin_settings_view(&app, services, user.id, &id).await
+}
+
+#[tauri::command]
+async fn set_plugin_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    values: serde_json::Value,
+    secrets: Option<serde_json::Value>,
+) -> Result<PluginSettingsView, String> {
+    if !harness::valid_plugin_id(&id) {
+        return Err("Invalid plugin id".into());
+    }
+    let services = state.services(&app).await?;
+    let _guard = services.mutation.lock().await;
+    let user = services.require_user("保存插件设置").await?;
+    let enabled = services.preferences.lock().await.enabled_plugins.clone();
+    let plugins = harness::list_plugins(&app, &enabled).await?;
+    if !plugins.iter().any(|plugin| plugin.id == id) {
+        return Err("Plugin not found".into());
+    }
+    let values = plugin_settings::sanitize_values(values)?;
+    let secret_updates = plugin_settings::sanitize_secrets(secrets)?;
+    let mut prefs = services.preferences.lock().await;
+    let mut names = plugin_settings::secret_names_for(&prefs, user.id, &id);
+    for (key, value) in &secret_updates {
+        names.retain(|item| item != key);
+        if value.is_some() {
+            names.push(key.clone());
+        }
+    }
+    plugin_settings::write_secrets(user.id, &id, secret_updates).await?;
+    plugin_settings::put_settings(&mut prefs, user.id, &id, values, names);
+    let summary = prefs.config.clone();
+    config::save(&app, prefs.clone()).await?;
+    drop(prefs);
+    if let Some(summary) = summary.filter(|config| config.user_id == user.id) {
+        services
+            .write_agent_config(&app, &summary, services.api.get_current_base_url())
+            .await?;
+        services.engines.shutdown_idle().await;
+        spawn_boot(app.clone());
+    }
+    plugin_settings_view(&app, services, user.id, &id).await
 }
 
 #[tauri::command]
@@ -820,15 +1304,21 @@ async fn start_stream(
     .await?
     .ok_or("The API key is unavailable. Run configuration again.")?;
     let endpoint = services.api.reachable_endpoint().await?;
-    let enabled = {
+    {
         let mut prefs = services.preferences.lock().await;
         if prefs.endpoint_index != endpoint.index {
             prefs.endpoint_index = endpoint.index;
             config::save(&app, prefs.clone()).await?;
         }
-        prefs.enabled_plugins.clone()
-    };
-    config::write_opencode_config(&app, &summary, &endpoint.base_url, &enabled).await?;
+    }
+    services
+        .write_agent_config(&app, &summary, &endpoint.base_url)
+        .await?;
+    let extra_env = services
+        .plugin_runtime(&app, user.id)
+        .await
+        .map(|runtime| runtime.2)
+        .unwrap_or_default();
     let engine = services.engine(&app, &summary).await?;
     engine
         .start(
@@ -837,14 +1327,7 @@ async fn start_stream(
                 prompt,
                 session_id,
             },
-            RunEnvironment {
-                config_path: summary.config_path.into(),
-                api_key: key,
-                model: Some(format!("sub2api/{}", summary.model)),
-                reasoning_effort: Some(config::normalize_reasoning_effort(Some(
-                    &summary.reasoning_effort,
-                ))),
-            },
+            Services::run_environment(&summary, key, extra_env),
             on_event,
         )
         .await
@@ -898,7 +1381,9 @@ async fn cancel_stream(
 async fn get_engine_status(
     app: AppHandle,
     state: State<'_, AppState>,
+    probe: Option<bool>,
 ) -> Result<EngineHealth, String> {
+    let _ = probe;
     let services = state.services(&app).await?;
     Ok(services.engines.health(&config::sidecar_path(&app)?).await)
 }
@@ -928,8 +1413,18 @@ fn native_commands(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
             install_plugin,
             set_plugin_enabled,
             uninstall_plugin,
+            store_catalog,
+            store_set_url,
+            store_prepare,
+            store_cancel,
+            store_install,
+            list_skills,
+            set_skill_enabled,
+            uninstall_skill,
             list_plugin_uis,
             list_plugin_mixins,
+            get_plugin_settings,
+            set_plugin_settings,
             list_conversations,
             save_conversations,
             start_stream,

@@ -1,8 +1,8 @@
 {
   "id": "probe",
   "name": "WASM探针",
-  "description": "用 backend.wasm 拦 get_engine_status，并在设置里放一页。",
-  "version": "0.1.0",
+  "description": "用 backend.wasm 拦带 probe 标记的 get_engine_status，并在设置里放一页。",
+  "version": "0.1.1",
   "mixins": [
     { "select": ".settings-page", "html": "page.html" },
     { "select": ".composer-context", "html": "badge.html" }

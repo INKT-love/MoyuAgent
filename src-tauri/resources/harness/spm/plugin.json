@@ -1,0 +1,9 @@
+{
+  "id": "spm",
+  "name": "SPM 记忆",
+  "description": "用 SPM MCP 记决策和约束，长会话可裁剪旧轮次。",
+  "version": "0.1.0",
+  "mixins": [
+    { "select": ".settings-page", "html": "page.html" }
+  ]
+}
