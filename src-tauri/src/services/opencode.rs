@@ -250,14 +250,12 @@ impl Engine {
         if let Some(server) = slot.as_ref() {
             let healthy = self.probe_health(&server.url, &server.password).await;
             if healthy
-                && server
-                    .fingerprint
-                    .matches(
-                        &config,
-                        &environment.api_key,
-                        &self.working_dir,
-                        &environment.extra_env,
-                    )
+                && server.fingerprint.matches(
+                    &config,
+                    &environment.api_key,
+                    &self.working_dir,
+                    &environment.extra_env,
+                )
             {
                 self.server_ready.store(true, Ordering::Release);
                 return Ok(false);

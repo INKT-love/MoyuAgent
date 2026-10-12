@@ -2,9 +2,7 @@
 //! Nothing here touches the app's real plugin or skill folders; installing is a separate,
 //! user-confirmed step that moves a staged directory into place.
 
-use super::store::{
-    self, CatalogItem, Inspection, MAX_CATALOG_BYTES, MAX_PACKAGE_BYTES,
-};
+use super::store::{self, CatalogItem, Inspection, MAX_CATALOG_BYTES, MAX_PACKAGE_BYTES};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use url::Url;
@@ -30,7 +28,11 @@ pub fn client() -> Result<reqwest::Client, String> {
 }
 
 /// Downloads `url` and fails as soon as the body exceeds `limit` bytes.
-pub async fn download(client: &reqwest::Client, url: &Url, limit: usize) -> Result<Vec<u8>, String> {
+pub async fn download(
+    client: &reqwest::Client,
+    url: &Url,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     if !store::allowed_url(url) {
         return Err("下载地址必须使用 https".to_owned());
     }
@@ -40,9 +42,15 @@ pub async fn download(client: &reqwest::Client, url: &Url, limit: usize) -> Resu
         .await
         .map_err(|_| "无法连接商店，请检查网络或商店地址".to_owned())?;
     if !response.status().is_success() {
-        return Err(format!("商店返回了错误（HTTP {}）", response.status().as_u16()));
+        return Err(format!(
+            "商店返回了错误（HTTP {}）",
+            response.status().as_u16()
+        ));
     }
-    if response.content_length().is_some_and(|length| length > limit as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
         return Err("下载内容超过大小限制".to_owned());
     }
     let mut body = Vec::new();
@@ -55,7 +63,10 @@ pub async fn download(client: &reqwest::Client, url: &Url, limit: usize) -> Resu
     Ok(body)
 }
 
-pub async fn fetch_catalog(client: &reqwest::Client, url: &Url) -> Result<Vec<CatalogItem>, String> {
+pub async fn fetch_catalog(
+    client: &reqwest::Client,
+    url: &Url,
+) -> Result<Vec<CatalogItem>, String> {
     let bytes = download(client, url, MAX_CATALOG_BYTES).await?;
     let text = String::from_utf8(bytes).map_err(|_| "商店目录不是有效的文本".to_owned())?;
     store::parse_catalog(&text, url)
@@ -92,7 +103,10 @@ pub async fn stage(
             if inspection.version.is_empty() {
                 inspection.version = item.version.clone();
             }
-            Ok(Staged { directory, inspection })
+            Ok(Staged {
+                directory,
+                inspection,
+            })
         }
         Err(error) => {
             let _ = tokio::fs::remove_dir_all(&directory).await;
@@ -114,7 +128,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {
-                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
                 let routes = routes.clone();
                 tokio::spawn(async move {
                     let mut buffer = vec![0u8; 4096];
@@ -123,10 +139,15 @@ mod tests {
                     let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
                     let found = routes.iter().find(|route| route.0 == path);
                     let (status, headers, body) = match found {
-                        Some((_, status, headers, body)) => (*status, headers.clone(), body.clone()),
+                        Some((_, status, headers, body)) => {
+                            (*status, headers.clone(), body.clone())
+                        }
                         None => (404, Vec::new(), b"missing".to_vec()),
                     };
-                    let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+                    let mut head = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n",
+                        body.len()
+                    );
                     for (name, value) in headers {
                         head.push_str(&format!("{name}: {value}\r\n"));
                     }
@@ -143,7 +164,9 @@ mod tests {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
         writer.start_file("plugin.json", options).unwrap();
-        writer.write_all(format!(r#"{{"id":"{id}","name":"Demo","version":"1.0.0"}}"#).as_bytes()).unwrap();
+        writer
+            .write_all(format!(r#"{{"id":"{id}","name":"Demo","version":"1.0.0"}}"#).as_bytes())
+            .unwrap();
         writer.finish().unwrap().into_inner()
     }
 
@@ -167,7 +190,13 @@ mod tests {
         let bytes = plugin_zip("demo");
         let port = serve(vec![("/demo.zip", 200, Vec::new(), bytes.clone())]).await;
         let root = tempfile::tempdir().unwrap();
-        let staged = stage(&client().unwrap(), &item(port, "/demo.zip", &bytes), root.path()).await.unwrap();
+        let staged = stage(
+            &client().unwrap(),
+            &item(port, "/demo.zip", &bytes),
+            root.path(),
+        )
+        .await
+        .unwrap();
         assert_eq!(staged.inspection.id, "demo");
         assert!(staged.directory.join("plugin.json").is_file());
     }
@@ -179,7 +208,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut wrong = item(port, "/demo.zip", &bytes);
         wrong.sha256 = "0".repeat(64);
-        let error = stage(&client().unwrap(), &wrong, root.path()).await.unwrap_err();
+        let error = stage(&client().unwrap(), &wrong, root.path())
+            .await
+            .unwrap_err();
         assert!(error.contains("校验失败"));
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
@@ -189,26 +220,61 @@ mod tests {
         let bytes = plugin_zip("other");
         let port = serve(vec![("/demo.zip", 200, Vec::new(), bytes.clone())]).await;
         let root = tempfile::tempdir().unwrap();
-        let error = stage(&client().unwrap(), &item(port, "/demo.zip", &bytes), root.path()).await.unwrap_err();
+        let error = stage(
+            &client().unwrap(),
+            &item(port, "/demo.zip", &bytes),
+            root.path(),
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("不一致"));
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0, "failed staging is cleaned up");
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "failed staging is cleaned up"
+        );
     }
 
     #[tokio::test]
     async fn download_follows_safe_redirects_only() {
         let port = serve(vec![
-            ("/a", 302, vec![("Location".into(), "/b".into())], Vec::new()),
+            (
+                "/a",
+                302,
+                vec![("Location".into(), "/b".into())],
+                Vec::new(),
+            ),
             ("/b", 200, Vec::new(), b"ok".to_vec()),
-            ("/evil", 302, vec![("Location".into(), "ftp://example.com/x".into())], Vec::new()),
-            ("/loop", 302, vec![("Location".into(), "/loop".into())], Vec::new()),
+            (
+                "/evil",
+                302,
+                vec![("Location".into(), "ftp://example.com/x".into())],
+                Vec::new(),
+            ),
+            (
+                "/loop",
+                302,
+                vec![("Location".into(), "/loop".into())],
+                Vec::new(),
+            ),
         ])
         .await;
         let base = format!("http://127.0.0.1:{port}");
         let client = client().unwrap();
-        let body = download(&client, &Url::parse(&format!("{base}/a")).unwrap(), 100).await.unwrap();
+        let body = download(&client, &Url::parse(&format!("{base}/a")).unwrap(), 100)
+            .await
+            .unwrap();
         assert_eq!(body, b"ok");
-        assert!(download(&client, &Url::parse(&format!("{base}/evil")).unwrap(), 100).await.is_err());
-        assert!(download(&client, &Url::parse(&format!("{base}/loop")).unwrap(), 100).await.is_err());
+        assert!(
+            download(&client, &Url::parse(&format!("{base}/evil")).unwrap(), 100)
+                .await
+                .is_err()
+        );
+        assert!(
+            download(&client, &Url::parse(&format!("{base}/loop")).unwrap(), 100)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -216,11 +282,21 @@ mod tests {
         let port = serve(vec![("/big", 200, Vec::new(), vec![1u8; 2048])]).await;
         let client = client().unwrap();
         let big = Url::parse(&format!("http://127.0.0.1:{port}/big")).unwrap();
-        assert!(download(&client, &big, 1024).await.unwrap_err().contains("大小限制"));
+        assert!(download(&client, &big, 1024)
+            .await
+            .unwrap_err()
+            .contains("大小限制"));
         assert_eq!(download(&client, &big, 4096).await.unwrap().len(), 2048);
         let missing = Url::parse(&format!("http://127.0.0.1:{port}/nope")).unwrap();
-        assert!(download(&client, &missing, 1024).await.unwrap_err().contains("404"));
-        assert!(download(&client, &Url::parse("http://example.com/x").unwrap(), 10).await.is_err());
+        assert!(download(&client, &missing, 1024)
+            .await
+            .unwrap_err()
+            .contains("404"));
+        assert!(
+            download(&client, &Url::parse("http://example.com/x").unwrap(), 10)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -231,9 +307,18 @@ mod tests {
             "version": "1.0.0", "url": "pkg/demo.zip", "sha256": store::sha256_hex(&bytes)
         }]})
         .to_string();
-        let port = serve(vec![("/store/index.json", 200, Vec::new(), catalog.into_bytes())]).await;
+        let port = serve(vec![(
+            "/store/index.json",
+            200,
+            Vec::new(),
+            catalog.into_bytes(),
+        )])
+        .await;
         let url = Url::parse(&format!("http://127.0.0.1:{port}/store/index.json")).unwrap();
         let items = fetch_catalog(&client().unwrap(), &url).await.unwrap();
-        assert_eq!(items[0].url, format!("http://127.0.0.1:{port}/store/pkg/demo.zip"));
+        assert_eq!(
+            items[0].url,
+            format!("http://127.0.0.1:{port}/store/pkg/demo.zip")
+        );
     }
 }

@@ -74,10 +74,17 @@ mod tests {
     #[test]
     fn config_registers_root_and_denies_disabled_skills() {
         let mut content = json!({ "permission": { "*": "allow", "skill": { "x": "allow" } } });
-        apply_to_config(&mut content, Path::new("/data/skills"), &["git-release".into(), "Bad Name".into()]);
+        apply_to_config(
+            &mut content,
+            Path::new("/data/skills"),
+            &["git-release".into(), "Bad Name".into()],
+        );
         assert_eq!(content["skills"]["paths"][0], "/data/skills");
         assert_eq!(content["permission"]["*"], "allow");
-        assert_eq!(content["permission"]["skill"], json!({ "git-release": "deny" }));
+        assert_eq!(
+            content["permission"]["skill"],
+            json!({ "git-release": "deny" })
+        );
     }
 
     #[test]
@@ -91,7 +98,10 @@ mod tests {
     async fn list_reads_valid_skills_only() {
         let dir = tempfile::tempdir().unwrap();
         for (folder, body) in [
-            ("git-release", "---\nname: git-release\ndescription: Make releases\n---\n"),
+            (
+                "git-release",
+                "---\nname: git-release\ndescription: Make releases\n---\n",
+            ),
             ("Bad_Name", "---\nname: x\ndescription: y\n---\n"),
         ] {
             std::fs::create_dir(dir.path().join(folder)).unwrap();

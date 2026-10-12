@@ -33,7 +33,9 @@ pub struct PluginSettingsView {
 }
 
 pub fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(config::app_directory(app)?.join("harness").join("plugin-state"))
+    Ok(config::app_directory(app)?
+        .join("harness")
+        .join("plugin-state"))
 }
 
 pub fn secret_name(user_id: i64, plugin_id: &str, key: &str) -> String {
@@ -105,11 +107,7 @@ pub fn sanitize_secrets(value: Option<Value>) -> Result<Vec<(String, Option<Stri
     Ok(secrets)
 }
 
-pub fn settings_for<'a>(
-    preferences: &'a Preferences,
-    user_id: i64,
-    plugin_id: &str,
-) -> Value {
+pub fn settings_for<'a>(preferences: &'a Preferences, user_id: i64, plugin_id: &str) -> Value {
     preferences
         .plugin_settings
         .get(&user_id.to_string())
@@ -524,9 +522,7 @@ pub fn inspect_applied(
             .unwrap_or(0);
         details.push(match (mode, effective) {
             (Some("fixed"), Some(model)) => format!("子 Agent 固定使用 {model}"),
-            (Some("fixed"), None) => {
-                "固定模型未生效：还没选择模型，或该模型不在当前分组里".into()
-            }
+            (Some("fixed"), None) => "固定模型未生效：还没选择模型，或该模型不在当前分组里".into(),
             (Some("auto"), _) if variants > 0 => {
                 format!("子 Agent 模型由主模型自行选择（{variants} 个变体）")
             }
@@ -672,9 +668,7 @@ pub async fn read_json_file(path: &Path) -> Option<Value> {
 }
 
 pub async fn read_text_file(path: &Path) -> String {
-    tokio::fs::read_to_string(path)
-        .await
-        .unwrap_or_default()
+    tokio::fs::read_to_string(path).await.unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -796,7 +790,13 @@ mod tests {
             subagent_settings(json!({ "modelMode": "follow" })),
             subagent_settings(json!({ "modelMode": "bogus" })),
         ] {
-            apply_subagent_models(&mut config, &mut instructions, &enabled, &settings, &available);
+            apply_subagent_models(
+                &mut config,
+                &mut instructions,
+                &enabled,
+                &settings,
+                &available,
+            );
             assert_eq!(config, before);
             assert!(instructions.is_empty());
         }
@@ -813,8 +813,14 @@ mod tests {
             &subagent_settings(json!({ "modelMode": "fixed", "model": "gpt-5.2-mini" })),
             &["gpt-5.2".into(), "gpt-5.2-mini".into()],
         );
-        assert_eq!(config["agent"]["researcher"]["model"], "sub2api/gpt-5.2-mini");
-        assert_eq!(config["agent"]["code-reviewer"]["model"], "sub2api/gpt-5.2-mini");
+        assert_eq!(
+            config["agent"]["researcher"]["model"],
+            "sub2api/gpt-5.2-mini"
+        );
+        assert_eq!(
+            config["agent"]["code-reviewer"]["model"],
+            "sub2api/gpt-5.2-mini"
+        );
         let registered = &config["provider"]["sub2api"]["models"]["gpt-5.2-mini"];
         assert_eq!(registered["name"], "gpt-5.2-mini");
         assert_eq!(registered["options"]["reasoningEffort"], "high");
@@ -855,10 +861,18 @@ mod tests {
     fn subagents_auto_mode_adds_variants_and_guidance() {
         let mut config = subagent_base_config();
         let mut instructions = String::from("## 子 Agent\n\n正文");
-        let available: Vec<String> = ["gpt-5.2", "gpt-5.2-mini", "claude-sonnet-4-6", "x1", "x2", "x3", "x4"]
-            .iter()
-            .map(|id| id.to_string())
-            .collect();
+        let available: Vec<String> = [
+            "gpt-5.2",
+            "gpt-5.2-mini",
+            "claude-sonnet-4-6",
+            "x1",
+            "x2",
+            "x3",
+            "x4",
+        ]
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
         apply_subagent_models(
             &mut config,
             &mut instructions,
@@ -873,7 +887,10 @@ mod tests {
         let variant = &config["agent"]["researcher--gpt-5-2-mini"];
         assert_eq!(variant["model"], "sub2api/gpt-5.2-mini");
         assert_eq!(variant["mode"], "subagent");
-        assert!(variant["description"].as_str().unwrap().contains("gpt-5.2-mini"));
+        assert!(variant["description"]
+            .as_str()
+            .unwrap()
+            .contains("gpt-5.2-mini"));
         assert!(config["provider"]["sub2api"]["models"]
             .get("claude-sonnet-4-6")
             .is_some());

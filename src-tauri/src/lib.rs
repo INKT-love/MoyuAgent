@@ -883,15 +883,20 @@ struct StorePreview {
 
 fn store_address(prefs: &Preferences) -> String {
     let value = prefs.store_url.trim();
-    if value.is_empty() { DEFAULT_STORE_URL.to_owned() } else { value.to_owned() }
+    if value.is_empty() {
+        DEFAULT_STORE_URL.to_owned()
+    } else {
+        value.to_owned()
+    }
 }
 
 async fn store_staging_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let directory = config::app_directory(app)?.join("store-staging");
-    tokio::fs::create_dir_all(&directory).await.map_err(|error| error.to_string())?;
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(directory)
 }
-
 
 async fn build_store_view(
     app: &AppHandle,
@@ -921,9 +926,9 @@ async fn build_store_view(
                     .map(|skill| (Some(String::new()), skill.enabled))
                     .unwrap_or((None, false)),
             };
-            let update_available = installed_version
-                .as_deref()
-                .is_some_and(|version| !version.is_empty() && store::is_newer(version, &item.version));
+            let update_available = installed_version.as_deref().is_some_and(|version| {
+                !version.is_empty() && store::is_newer(version, &item.version)
+            });
             StoreItemView {
                 installed: installed_version.is_some(),
                 installed_version: installed_version.filter(|version| !version.is_empty()),
@@ -985,8 +990,14 @@ async fn store_prepare(
     let staging = store_staging_dir(&app).await?;
     let staged = store_client::stage(&client, &item, &staging).await?;
     let replaces = match kind {
-        Kind::Plugin => harness::plugins_dir(&app)?.join(&id).exists().then(|| id.clone()),
-        Kind::Skill => skills::skills_dir(&app)?.join(&id).exists().then(|| id.clone()),
+        Kind::Plugin => harness::plugins_dir(&app)?
+            .join(&id)
+            .exists()
+            .then(|| id.clone()),
+        Kind::Skill => skills::skills_dir(&app)?
+            .join(&id)
+            .exists()
+            .then(|| id.clone()),
     };
     if kind == Kind::Plugin
         && harness::bundled_plugins_root(&app).is_some_and(|root| root.join(&id).exists())
@@ -997,20 +1008,34 @@ async fn store_prepare(
     let token = uuid::Uuid::new_v4().simple().to_string();
     let mut pending = services.staged.lock().await;
     while pending.len() >= MAX_STAGED {
-        let Some(oldest) = pending.keys().next().cloned() else { break };
+        let Some(oldest) = pending.keys().next().cloned() else {
+            break;
+        };
         if let Some(old) = pending.remove(&oldest) {
             let _ = tokio::fs::remove_dir_all(&old.directory).await;
         }
     }
     pending.insert(
         token.clone(),
-        StagedPackage { directory: staged.directory, kind, id },
+        StagedPackage {
+            directory: staged.directory,
+            kind,
+            id,
+        },
     );
-    Ok(StorePreview { token, inspection: staged.inspection, replaces })
+    Ok(StorePreview {
+        token,
+        inspection: staged.inspection,
+        replaces,
+    })
 }
 
 #[tauri::command]
-async fn store_cancel(state: State<'_, AppState>, app: AppHandle, token: String) -> Result<(), String> {
+async fn store_cancel(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    token: String,
+) -> Result<(), String> {
     let services = state.services(&app).await?;
     if let Some(staged) = services.staged.lock().await.remove(&token) {
         let _ = tokio::fs::remove_dir_all(&staged.directory).await;
@@ -1018,7 +1043,11 @@ async fn store_cancel(state: State<'_, AppState>, app: AppHandle, token: String)
     Ok(())
 }
 
-async fn apply_agent_changes(app: &AppHandle, services: &Services, enabled: &[String]) -> Result<(), String> {
+async fn apply_agent_changes(
+    app: &AppHandle,
+    services: &Services,
+    enabled: &[String],
+) -> Result<(), String> {
     let summary = services.preferences.lock().await.config.clone();
     if let Some(summary) = summary {
         services
@@ -1058,10 +1087,14 @@ async fn store_install(
             Kind::Skill => {
                 let destination = skills::skills_dir(&app)?.join(&staged.id);
                 if let Some(parent) = destination.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|error| error.to_string())?;
                 }
                 if destination.exists() {
-                    tokio::fs::remove_dir_all(&destination).await.map_err(|error| error.to_string())?;
+                    tokio::fs::remove_dir_all(&destination)
+                        .await
+                        .map_err(|error| error.to_string())?;
                 }
                 tokio::fs::rename(&staged.directory, &destination)
                     .await
@@ -1078,9 +1111,10 @@ async fn store_install(
     let enabled = services.preferences.lock().await.enabled_plugins.clone();
     apply_agent_changes(&app, services, &enabled).await?;
     let url = store_address(&*services.preferences.lock().await);
-    let items = store_client::fetch_catalog(&store_client::client()?, &store::parse_catalog_url(&url)?)
-        .await
-        .unwrap_or_default();
+    let items =
+        store_client::fetch_catalog(&store_client::client()?, &store::parse_catalog_url(&url)?)
+            .await
+            .unwrap_or_default();
     build_store_view(&app, services, url, items).await
 }
 
@@ -1123,7 +1157,9 @@ async fn uninstall_skill(
     let _guard = services.mutation.lock().await;
     let directory = skills::skills_dir(&app)?.join(&name);
     if directory.exists() {
-        tokio::fs::remove_dir_all(&directory).await.map_err(|error| error.to_string())?;
+        tokio::fs::remove_dir_all(&directory)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     let disabled = {
         let mut prefs = services.preferences.lock().await;
@@ -1185,8 +1221,7 @@ async fn plugin_settings_view(
         Some(path) => plugin_settings::read_json_file(std::path::Path::new(&path)).await,
         None => None,
     };
-    let instructions =
-        plugin_settings::read_text_file(&harness::instructions_path(app)?).await;
+    let instructions = plugin_settings::read_text_file(&harness::instructions_path(app)?).await;
     let state = plugin_settings::read_json_file(
         &plugin_settings::state_dir(app)?.join(format!("{plugin_id}.json")),
     )

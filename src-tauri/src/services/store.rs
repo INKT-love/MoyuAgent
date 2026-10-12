@@ -103,7 +103,8 @@ fn clean_text(value: &str, limit: usize) -> String {
 
 /// Parses a catalog. Invalid entries are skipped instead of failing the whole catalog.
 pub fn parse_catalog(text: &str, base: &Url) -> Result<Vec<CatalogItem>, String> {
-    let value: Value = serde_json::from_str(text).map_err(|_| "商店目录不是有效的 JSON".to_owned())?;
+    let value: Value =
+        serde_json::from_str(text).map_err(|_| "商店目录不是有效的 JSON".to_owned())?;
     let entries = value
         .get("items")
         .and_then(Value::as_array)
@@ -133,7 +134,13 @@ pub fn parse_catalog(text: &str, base: &Url) -> Result<Vec<CatalogItem>, String>
         item.description = clean_text(&item.description, 400);
         item.version = clean_text(&item.version, 32);
         item.author = clean_text(&item.author, 80);
-        item.tags = item.tags.iter().map(|tag| clean_text(tag, 24)).filter(|tag| !tag.is_empty()).take(8).collect();
+        item.tags = item
+            .tags
+            .iter()
+            .map(|tag| clean_text(tag, 24))
+            .filter(|tag| !tag.is_empty())
+            .take(8)
+            .collect();
         if item.name.is_empty() || item.version.is_empty() {
             continue;
         }
@@ -189,7 +196,11 @@ pub struct Inspection {
 }
 
 fn capability(risk: Risk, title: &str, detail: &str) -> Capability {
-    Capability { risk, title: title.to_owned(), detail: detail.to_owned() }
+    Capability {
+        risk,
+        title: title.to_owned(),
+        detail: detail.to_owned(),
+    }
 }
 
 fn read_limited(path: &Path) -> Option<String> {
@@ -211,7 +222,8 @@ fn frontmatter(text: &str, key: &str) -> Option<String> {
 }
 
 fn inspect_skill(dir: &Path) -> Result<Inspection, String> {
-    let text = read_limited(&dir.join("SKILL.md")).ok_or_else(|| "技能包缺少 SKILL.md".to_owned())?;
+    let text =
+        read_limited(&dir.join("SKILL.md")).ok_or_else(|| "技能包缺少 SKILL.md".to_owned())?;
     let name = frontmatter(&text, "name").unwrap_or_default();
     let description = frontmatter(&text, "description").unwrap_or_default();
     if !valid_skill_name(&name) {
@@ -228,14 +240,24 @@ fn inspect_skill(dir: &Path) -> Result<Inspection, String> {
     let mut scripts = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&current) else { continue };
+        let Ok(read) = std::fs::read_dir(&current) else {
+            continue;
+        };
         for entry in read.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
             } else if let Some(ext) = path.extension().and_then(|value| value.to_str()) {
-                if matches!(ext.to_ascii_lowercase().as_str(), "sh" | "ps1" | "bat" | "cmd" | "py" | "js" | "mjs" | "ts" | "exe") {
-                    scripts.push(path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/"));
+                if matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "sh" | "ps1" | "bat" | "cmd" | "py" | "js" | "mjs" | "ts" | "exe"
+                ) {
+                    scripts.push(
+                        path.strip_prefix(dir)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
                 }
             }
         }
@@ -245,22 +267,49 @@ fn inspect_skill(dir: &Path) -> Result<Inspection, String> {
         capabilities.push(capability(
             Risk::Medium,
             "附带可执行脚本",
-            &format!("Agent 可能运行这些文件：{}", scripts.iter().take(6).cloned().collect::<Vec<_>>().join("、")),
+            &format!(
+                "Agent 可能运行这些文件：{}",
+                scripts
+                    .iter()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
         ));
     }
-    Ok(Inspection { id: name.clone(), kind: Kind::Skill, name, version: String::new(), capabilities })
+    Ok(Inspection {
+        id: name.clone(),
+        kind: Kind::Skill,
+        name,
+        version: String::new(),
+        capabilities,
+    })
 }
 
 fn inspect_plugin(dir: &Path) -> Result<Inspection, String> {
-    let raw = read_limited(&dir.join("plugin.json")).ok_or_else(|| "插件包缺少 plugin.json".to_owned())?;
-    let value: Value = serde_json::from_str(&raw).map_err(|_| "plugin.json 不是有效的 JSON".to_owned())?;
+    let raw = read_limited(&dir.join("plugin.json"))
+        .ok_or_else(|| "插件包缺少 plugin.json".to_owned())?;
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|_| "plugin.json 不是有效的 JSON".to_owned())?;
     let id = value.get("id").and_then(Value::as_str).unwrap_or("");
     if !valid_plugin_id(id) {
         return Err("plugin.json 的 id 只能含小写字母、数字和短横线".to_owned());
     }
-    let name = value.get("name").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty());
-    let name = name.ok_or_else(|| "plugin.json 缺少 name".to_owned())?.to_owned();
-    let version = value.get("version").and_then(Value::as_str).unwrap_or("0.1.0").trim().to_owned();
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let name = name
+        .ok_or_else(|| "plugin.json 缺少 name".to_owned())?
+        .to_owned();
+    let version = value
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("0.1.0")
+        .trim()
+        .to_owned();
     let mut capabilities = Vec::new();
     if dir.join("backend.wasm").is_file() {
         capabilities.push(capability(
@@ -269,7 +318,10 @@ fn inspect_plugin(dir: &Path) -> Result<Inspection, String> {
             "WASM 后端会看到每次界面到后端的调用参数（包括登录邮箱和密码），可以拒绝或替换结果。它不能访问磁盘和网络。",
         ));
     }
-    if ["index.mjs", "index.js"].iter().any(|file| dir.join(file).is_file()) {
+    if ["index.mjs", "index.js"]
+        .iter()
+        .any(|file| dir.join(file).is_file())
+    {
         capabilities.push(capability(
             Risk::High,
             "在 OpenCode 里运行代码",
@@ -279,28 +331,72 @@ fn inspect_plugin(dir: &Path) -> Result<Inspection, String> {
     if let Some(patch) = read_limited(&dir.join("opencode.patch.json")) {
         let keys: Vec<String> = serde_json::from_str::<Value>(&patch)
             .ok()
-            .and_then(|value| value.as_object().map(|object| object.keys().cloned().collect()))
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect())
+            })
             .unwrap_or_default();
-        let detail = if keys.is_empty() { "补丁无法解析，安装时会被拒绝。".to_owned() } else { format!("会改动 Agent 配置：{}。不能改模型和线路。", keys.join("、")) };
-        let risk = if keys.iter().any(|key| matches!(key.as_str(), "mcp" | "permission" | "plugin" | "command")) { Risk::High } else { Risk::Medium };
+        let detail = if keys.is_empty() {
+            "补丁无法解析，安装时会被拒绝。".to_owned()
+        } else {
+            format!("会改动 Agent 配置：{}。不能改模型和线路。", keys.join("、"))
+        };
+        let risk = if keys
+            .iter()
+            .any(|key| matches!(key.as_str(), "mcp" | "permission" | "plugin" | "command"))
+        {
+            Risk::High
+        } else {
+            Risk::Medium
+        };
         capabilities.push(capability(risk, "修改 Agent 配置", &detail));
     }
     if dir.join("AGENTS.md").is_file() {
-        capabilities.push(capability(Risk::Medium, "追加 Agent 提示词", "AGENTS.md 的内容会加入每次对话的系统提示。"));
+        capabilities.push(capability(
+            Risk::Medium,
+            "追加 Agent 提示词",
+            "AGENTS.md 的内容会加入每次对话的系统提示。",
+        ));
     }
-    let has_mixin = value.get("mixins").and_then(Value::as_array).is_some_and(|items| !items.is_empty()) || dir.join("ui.html").is_file();
+    let has_mixin = value
+        .get("mixins")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || dir.join("ui.html").is_file();
     if has_mixin {
-        let scripted = value.get("mixins").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item.get("script").is_some()));
+        let scripted = value
+            .get("mixins")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.get("script").is_some()));
         capabilities.push(capability(
             if scripted { Risk::High } else { Risk::Medium },
-            if scripted { "在界面里运行脚本" } else { "在界面里加入内容" },
-            if scripted { "界面脚本能读取并修改当前页面上的内容。" } else { "页面片段跑在沙箱里，可调用你开放给插件的应用命令。" },
+            if scripted {
+                "在界面里运行脚本"
+            } else {
+                "在界面里加入内容"
+            },
+            if scripted {
+                "界面脚本能读取并修改当前页面上的内容。"
+            } else {
+                "页面片段跑在沙箱里，可调用你开放给插件的应用命令。"
+            },
         ));
     }
     if capabilities.is_empty() {
-        capabilities.push(capability(Risk::Low, "没有额外能力", "这个插件只包含基本信息。"));
+        capabilities.push(capability(
+            Risk::Low,
+            "没有额外能力",
+            "这个插件只包含基本信息。",
+        ));
     }
-    Ok(Inspection { id: id.to_owned(), kind: Kind::Plugin, name, version, capabilities })
+    Ok(Inspection {
+        id: id.to_owned(),
+        kind: Kind::Plugin,
+        name,
+        version,
+        capabilities,
+    })
 }
 
 /// Inspects an extracted package and checks it is the item the catalog promised.
@@ -310,9 +406,14 @@ pub fn inspect_dir(kind: Kind, dir: &Path, expected_id: &str) -> Result<Inspecti
         Kind::Skill => inspect_skill(dir)?,
     };
     if found.id != expected_id {
-        return Err(format!("安装包里的名称（{}）和目录里的（{expected_id}）不一致", found.id));
+        return Err(format!(
+            "安装包里的名称（{}）和目录里的（{expected_id}）不一致",
+            found.id
+        ));
     }
-    found.capabilities.sort_by_key(|item| std::cmp::Reverse(item.risk as u8));
+    found
+        .capabilities
+        .sort_by_key(|item| std::cmp::Reverse(item.risk as u8));
     Ok(found)
 }
 
@@ -355,14 +456,19 @@ pub fn extract_zip(bytes: &[u8], destination: &Path) -> Result<usize, String> {
     if bytes.len() > MAX_PACKAGE_BYTES {
         return Err("安装包超过大小限制".to_owned());
     }
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| "安装包不是有效的 zip".to_owned())?;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| "安装包不是有效的 zip".to_owned())?;
     if archive.len() > MAX_FILES {
         return Err("安装包里的文件过多".to_owned());
     }
     let mut entries = Vec::new();
     for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|_| "安装包已损坏".to_owned())?;
-        let is_link = entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000);
+        let entry = archive
+            .by_index(index)
+            .map_err(|_| "安装包已损坏".to_owned())?;
+        let is_link = entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000);
         if is_link {
             return Err(format!("安装包里不允许符号链接：{}", entry.name()));
         }
@@ -374,12 +480,18 @@ pub fn extract_zip(bytes: &[u8], destination: &Path) -> Result<usize, String> {
         .collect::<Vec<_>>()
         .windows(2)
         .all(|pair| pair[0] == pair[1])
-        && entries.iter().all(|(_, path, is_dir)| path.components().count() > 1 || *is_dir);
+        && entries
+            .iter()
+            .all(|(_, path, is_dir)| path.components().count() > 1 || *is_dir);
     std::fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let mut total = 0u64;
     let mut files = 0usize;
     for (index, path, is_dir) in entries {
-        let relative: PathBuf = if strip { path.components().skip(1).collect() } else { path };
+        let relative: PathBuf = if strip {
+            path.components().skip(1).collect()
+        } else {
+            path
+        };
         if relative.as_os_str().is_empty() {
             continue;
         }
@@ -391,7 +503,9 @@ pub fn extract_zip(bytes: &[u8], destination: &Path) -> Result<usize, String> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let mut entry = archive.by_index(index).map_err(|_| "安装包已损坏".to_owned())?;
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|_| "安装包已损坏".to_owned())?;
         let mut data = Vec::new();
         entry
             .by_ref()
@@ -419,7 +533,8 @@ mod tests {
 
     fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for (name, body) in files {
             writer.start_file(*name, options).unwrap();
             writer.write_all(body.as_bytes()).unwrap();
@@ -429,7 +544,10 @@ mod tests {
 
     #[test]
     fn sha256_matches_known_vector() {
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -438,7 +556,9 @@ mod tests {
         assert!(allowed_url(&Url::parse("http://127.0.0.1:8080/x").unwrap()));
         assert!(!allowed_url(&Url::parse("http://a.example/x").unwrap()));
         assert!(!allowed_url(&Url::parse("file:///etc/passwd").unwrap()));
-        assert!(!allowed_url(&Url::parse("https://user:pw@a.example/x").unwrap()));
+        assert!(!allowed_url(
+            &Url::parse("https://user:pw@a.example/x").unwrap()
+        ));
         assert!(parse_catalog_url("ftp://a.example/index.json").is_err());
     }
 
@@ -457,7 +577,10 @@ mod tests {
         let items = parse_catalog(&text, &base()).unwrap();
         let ids: Vec<_> = items.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, ["concise", "ok-skill"]);
-        assert_eq!(items[0].url, "https://store.example.com/moyu/pkg/concise.zip");
+        assert_eq!(
+            items[0].url,
+            "https://store.example.com/moyu/pkg/concise.zip"
+        );
         assert_eq!(items[0].sha256, "a".repeat(64));
         assert!(parse_catalog("{}", &base()).is_err());
         assert!(parse_catalog("nope", &base()).is_err());
@@ -494,7 +617,16 @@ mod tests {
     #[test]
     fn extract_rejects_unsafe_entries() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["../evil.txt", "a/../../evil.txt", "/abs.txt", "C:/x.txt", "a\\b.txt", ".git/config", "nul.txt", "dots.."] {
+        for name in [
+            "../evil.txt",
+            "a/../../evil.txt",
+            "/abs.txt",
+            "C:/x.txt",
+            "a\\b.txt",
+            ".git/config",
+            "nul.txt",
+            "dots..",
+        ] {
             let bytes = zip_of(&[("plugin.json", "{}"), (name, "x")]);
             let result = extract_zip(&bytes, &dir.path().join("out"));
             assert!(result.is_err(), "{name} must be rejected");
@@ -528,22 +660,41 @@ mod tests {
     #[test]
     fn plugin_inspection_reports_real_capabilities() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "plugin.json", r#"{"id":"probe","name":"探针","version":"1.2.0"}"#);
+        write(
+            dir.path(),
+            "plugin.json",
+            r#"{"id":"probe","name":"探针","version":"1.2.0"}"#,
+        );
         write(dir.path(), "backend.wasm", "\0asm");
         write(dir.path(), "AGENTS.md", "hi");
         write(dir.path(), "opencode.patch.json", r#"{"mcp":{}}"#);
         let found = inspect_dir(Kind::Plugin, dir.path(), "probe").unwrap();
         assert_eq!(found.version, "1.2.0");
-        let titles: Vec<_> = found.capabilities.iter().map(|item| item.title.as_str()).collect();
+        let titles: Vec<_> = found
+            .capabilities
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect();
         assert!(titles.contains(&"拦截后端命令") && titles.contains(&"追加 Agent 提示词"));
-        assert_eq!(found.capabilities[0].risk, Risk::High, "highest risk is listed first");
-        assert!(inspect_dir(Kind::Plugin, dir.path(), "other").is_err(), "id must match the catalog");
+        assert_eq!(
+            found.capabilities[0].risk,
+            Risk::High,
+            "highest risk is listed first"
+        );
+        assert!(
+            inspect_dir(Kind::Plugin, dir.path(), "other").is_err(),
+            "id must match the catalog"
+        );
     }
 
     #[test]
     fn plugin_without_extras_is_low_risk() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "plugin.json", r#"{"id":"plain","name":"Plain"}"#);
+        write(
+            dir.path(),
+            "plugin.json",
+            r#"{"id":"plain","name":"Plain"}"#,
+        );
         let found = inspect_dir(Kind::Plugin, dir.path(), "plain").unwrap();
         assert_eq!(found.capabilities.len(), 1);
         assert_eq!(found.capabilities[0].risk, Risk::Low);
@@ -554,7 +705,11 @@ mod tests {
     #[test]
     fn skill_inspection_validates_frontmatter_and_flags_scripts() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "SKILL.md", "---\nname: git-release\ndescription: Create releases\n---\nbody");
+        write(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: git-release\ndescription: Create releases\n---\nbody",
+        );
         let plain = inspect_dir(Kind::Skill, dir.path(), "git-release").unwrap();
         assert_eq!(plain.capabilities.len(), 1);
         std::fs::create_dir(dir.path().join("scripts")).unwrap();
@@ -562,7 +717,11 @@ mod tests {
         let scripted = inspect_dir(Kind::Skill, dir.path(), "git-release").unwrap();
         assert_eq!(scripted.capabilities[0].risk, Risk::Medium);
         assert!(scripted.capabilities[0].detail.contains("scripts/run.sh"));
-        write(dir.path(), "SKILL.md", "---\nname: Bad Name\ndescription: x\n---\n");
+        write(
+            dir.path(),
+            "SKILL.md",
+            "---\nname: Bad Name\ndescription: x\n---\n",
+        );
         assert!(inspect_dir(Kind::Skill, dir.path(), "git-release").is_err());
         write(dir.path(), "SKILL.md", "no frontmatter");
         assert!(inspect_dir(Kind::Skill, dir.path(), "git-release").is_err());
