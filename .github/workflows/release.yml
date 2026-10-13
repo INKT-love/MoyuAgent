@@ -74,10 +74,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.path }}
+          INSTALLER_NAME: ${{ steps.installer.outputs.name }}
         shell: pwsh
-        run: |
-          node scripts/assert-new-github-release.mjs $env:TAG
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $version = $env:TAG.TrimStart('v')
-          $notes = "Windows x64 NSIS installer for Moyu Agent $version.`nBuilt by GitHub Actions from $($env:GITHUB_SHA)."
-          gh release create $env:TAG --title $env:TAG --notes $notes --verify-tag -- "${{ steps.installer.outputs.path }}"
+        # Retries transient GitHub errors (5xx/429/network) and cleans up half-created drafts.
+        run: node scripts/publish-github-release.mjs $env:TAG $env:INSTALLER_PATH $env:INSTALLER_NAME
